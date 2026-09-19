@@ -117,31 +117,31 @@ def test_extension_no_permitida_se_deniega(guardian: Guardian) -> None:
 # -- Comandos ---------------------------------------------------------------
 
 
-def test_programa_no_autorizado_se_deniega(guardian: Guardian) -> None:
-    v = guardian.evaluar(
-        Peticion(accion="ejecutar_comando", objetivo="format C: /q")
-    )
-    assert v.decision is Decision.DENEGADO
+# 'ejecutar_comando' ya no está en la política: se quitó porque ninguna
+# habilidad lo usaba y era el permiso de más riesgo del proyecto. La validación
+# sigue aquí, probada, para cuando haga falta una habilidad que la necesite.
 
 
-def test_comando_encadenado_se_deniega(guardian: Guardian) -> None:
-    """Un programa permitido no puede servir de vehículo para otro."""
-    v = guardian.evaluar(
-        Peticion(accion="ejecutar_comando", objetivo="git status && shutdown /s")
-    )
-    assert v.decision is Decision.DENEGADO
-
-
-def test_comando_con_redireccion_se_deniega(guardian: Guardian) -> None:
-    v = guardian.evaluar(
-        Peticion(accion="ejecutar_comando", objetivo="python x.py > C:/Windows/a.txt")
-    )
-    assert v.decision is Decision.DENEGADO
-
-
-def test_comando_valido_pide_confirmacion(guardian: Guardian) -> None:
+def test_ejecutar_comando_ya_no_esta_permitido(guardian: Guardian) -> None:
     v = guardian.evaluar(Peticion(accion="ejecutar_comando", objetivo="git status"))
-    assert v.decision is Decision.NECESITA_CONFIRMACION
+    assert v.decision is Decision.DENEGADO
+
+
+def test_programa_no_autorizado_no_pasa_la_validacion(guardian: Guardian) -> None:
+    assert guardian._validar_comando("format C: /q") is not None
+
+
+def test_comando_encadenado_no_pasa_la_validacion(guardian: Guardian) -> None:
+    """Un programa permitido no puede servir de vehículo para otro."""
+    assert guardian._validar_comando("git status && shutdown /s") is not None
+
+
+def test_comando_con_redireccion_no_pasa_la_validacion(guardian: Guardian) -> None:
+    assert guardian._validar_comando("python x.py > C:/Windows/a.txt") is not None
+
+
+def test_un_comando_limpio_pasa_la_validacion(guardian: Guardian) -> None:
+    assert guardian._validar_comando("git status") is None
 
 
 # -- Ejecución --------------------------------------------------------------

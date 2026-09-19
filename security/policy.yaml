@@ -103,16 +103,22 @@ acciones:
   abrir_url:           permitir   # Solo http y https; el resto se rechaza en la habilidad.
 
   # --- Modificación (reversibles pero con consecuencias) ---
-  crear_archivo:       confirmar
   escribir_archivo:    confirmar
-  mover_archivo:       confirmar
   copiar_archivo:      confirmar
   crear_carpeta:       confirmar
-  domotica:            confirmar
 
   # --- Destructivo (te lo pregunta siempre, sin excepción) ---
+  # Mover está aquí y no arriba porque el original DESAPARECE de su sitio.
+  mover_archivo:       confirmar
   borrar_archivo:      confirmar
-  ejecutar_comando:    confirmar
+
+  # NOTA SOBRE LO QUE NO ESTÁ AQUÍ
+  # 'ejecutar_comando' y 'domotica' se quitaron a propósito: ninguna habilidad
+  # los usaba, y un permiso concedido a nada es superficie de ataque gratis. El
+  # primero era además el de más riesgo del proyecto. La validación de comandos
+  # sigue en guard.py, probada y lista, para cuando haya una habilidad que de
+  # verdad la necesite; entonces se vuelve a añadir aquí.
+  # 'crear_archivo' se quitó por redundante: escribir_archivo ya crea.
 
   # --- Nunca, bajo ninguna circunstancia ---
   # Estas son las que pueden dejarte el PC inservible o comprometer tus cuentas.
