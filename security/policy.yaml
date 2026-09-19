@@ -1,0 +1,186 @@
+# ============================================================================
+#  POLÍTICA DE SEGURIDAD DE JARVIS
+# ============================================================================
+#  Este archivo es la única fuente de verdad sobre lo que Jarvis puede hacer.
+#  El guardián (security/guard.py) consulta este archivo ANTES de ejecutar
+#  cualquier acción. Lo que no esté aquí, no se ejecuta.
+#
+#  Modelo: LISTA BLANCA ESTRICTA.
+#  Todo está prohibido salvo lo que se permita explícitamente más abajo.
+# ============================================================================
+
+# Modo de operación global.
+#   estricto   -> solo lo listado aquí; lo demás se rechaza o se pregunta.
+#   permisivo  -> reservado para el futuro; hoy se comporta igual que estricto.
+modo: estricto
+
+# ---------------------------------------------------------------------------
+# RUTAS
+# ---------------------------------------------------------------------------
+# Jarvis solo ve el disco a través de estas rutas. Cualquier ruta fuera de
+# 'lectura' es invisible para él; cualquier escritura fuera de 'escritura'
+# se rechaza aunque el modelo insista.
+#
+# La tilde (~) es tu carpeta de usuario, sea cual sea. Ajusta esta lista a lo
+# que quieras que Jarvis pueda ver: cuanto menos, mejor.
+rutas:
+  lectura:
+    - "~/Documents"
+    - "~/Downloads"
+    - "~/Desktop"
+    - "~/Pictures"
+    - "~/Music"
+
+  escritura:
+    - "~/Documents/Jarvis/workspace"
+    - "~/Desktop"
+
+  # Rutas prohibidas SIEMPRE, aunque estuvieran dentro de una permitida.
+  # Esta lista gana sobre todas las demás. Es la red de seguridad final.
+  prohibidas:
+    - "C:/Windows"
+    - "C:/Program Files"
+    - "C:/Program Files (x86)"
+    - "C:/ProgramData"
+    - "~/AppData"
+    - "~/Documents/Jarvis/security"
+    - "~/.ssh"
+    - "~/.aws"
+    - "~/.claude"
+
+# ---------------------------------------------------------------------------
+# EXTENSIONES DE ARCHIVO
+# ---------------------------------------------------------------------------
+archivos:
+  # Solo puede leer y escribir estos tipos de archivo.
+  extensiones_permitidas:
+    - ".txt"
+    - ".md"
+    - ".pdf"
+    - ".docx"
+    - ".xlsx"
+    - ".csv"
+    - ".json"
+    - ".yaml"
+    - ".yml"
+    - ".py"
+    - ".log"
+    - ".png"
+    - ".jpg"
+    - ".jpeg"
+
+  # Tamaño máximo que puede leer de una vez, en megabytes.
+  max_mb_lectura: 25
+
+# ---------------------------------------------------------------------------
+# ACCIONES
+# ---------------------------------------------------------------------------
+# Cada acción tiene un nivel:
+#   permitir   -> se ejecuta sin preguntar.
+#   confirmar  -> se muestra exactamente qué va a hacer y espera tu "sí".
+#   prohibir   -> se rechaza siempre, sin posibilidad de confirmación.
+acciones:
+  # --- Lectura e información (inofensivas) ---
+  leer_archivo:        permitir
+  listar_carpeta:      permitir
+  buscar_archivos:     permitir
+  info_sistema:        permitir
+  hora_fecha:          permitir
+  clima:               permitir
+  buscar_web:          permitir
+  terminar_conversacion: permitir   # Solo cierra el orbe; no toca el sistema.
+  apagar_jarvis:         permitir   # Cierra el propio Jarvis, nada más del equipo.
+  anotar_carencia:       permitir   # Escribe en su propio archivo de pendientes.
+  contar_chiste:         permitir   # No toca nada del equipo.
+  consultar_datos:       permitir   # Solo lee su propia memoria.
+  recordar_dato:         permitir   # Escribe en su propia memoria, no en tu disco.
+  olvidar_dato:          permitir   # Borra de su propia memoria.
+
+  # --- Multimedia (reversibles, sin riesgo) ---
+  control_volumen:     permitir
+  control_musica:      permitir
+  abrir_app:           permitir
+  abrir_url:           permitir   # Solo http y https; el resto se rechaza en la habilidad.
+
+  # --- Modificación (reversibles pero con consecuencias) ---
+  crear_archivo:       confirmar
+  escribir_archivo:    confirmar
+  mover_archivo:       confirmar
+  copiar_archivo:      confirmar
+  crear_carpeta:       confirmar
+  domotica:            confirmar
+
+  # --- Destructivo (te lo pregunta siempre, sin excepción) ---
+  borrar_archivo:      confirmar
+  ejecutar_comando:    confirmar
+
+  # --- Nunca, bajo ninguna circunstancia ---
+  # Estas son las que pueden dejarte el PC inservible o comprometer tus cuentas.
+  eliminar_carpeta_recursivo: prohibir
+  modificar_registro:         prohibir
+  instalar_software:          prohibir
+  desinstalar_software:       prohibir
+  apagar_reiniciar:           prohibir
+  modificar_servicios:        prohibir
+  modificar_firewall:         prohibir
+  gestionar_usuarios:         prohibir
+  formatear_disco:            prohibir
+  editar_politica:            prohibir   # Jarvis no puede reescribir este archivo.
+
+# ---------------------------------------------------------------------------
+# COMANDOS DE CONSOLA
+# ---------------------------------------------------------------------------
+# Incluso cuando confirmas 'ejecutar_comando', el comando debe empezar por uno
+# de estos programas. Es una segunda barrera por si la confirmación se acepta
+# por inercia.
+comandos:
+  programas_permitidos:
+    - "git"
+    - "python"
+    - "pip"
+    - "node"
+    - "npm"
+    - "ollama"
+
+  # Fragmentos que invalidan un comando aunque el programa esté permitido.
+  # Bloquean encadenar órdenes o colar algo peligroso dentro de uno legítimo.
+  patrones_prohibidos:
+    - "rm -rf"
+    - "del /f"
+    - "format"
+    - "diskpart"
+    - "reg delete"
+    - "shutdown"
+    - "taskkill"
+    - "Remove-Item"
+    - "Invoke-Expression"
+    - "iex"
+    - "curl"
+    - "wget"
+    - "certutil"
+    - ">"
+    - "|"
+    - "&"
+    - ";"
+    - "`"
+    - "$("
+
+# ---------------------------------------------------------------------------
+# LÍMITES DE USO
+# ---------------------------------------------------------------------------
+# Frenos contra bucles: si el modelo se atasca repitiendo una acción, estos
+# topes lo detienen antes de que haga daño acumulado.
+limites:
+  max_acciones_por_peticion: 15
+  max_confirmaciones_por_hora: 30
+  max_archivos_por_operacion: 20
+
+# ---------------------------------------------------------------------------
+# REGISTRO
+# ---------------------------------------------------------------------------
+registro:
+  activo: true
+  ruta: "security/audit.log"
+  # Registrar también las acciones rechazadas: son la señal más útil para
+  # detectar que algo va mal.
+  incluir_rechazadas: true

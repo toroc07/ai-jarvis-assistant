@@ -1,0 +1,25 @@
+# --- Datos personales: NUNCA se suben ---
+# Tu huella vocal, tus conversaciones, lo que Jarvis recuerda de ti,
+# los modelos descargados y el registro de lo que no supo hacer.
+data/
+
+# Tus claves de API y tu configuración.
+.env
+
+# Registro de todo lo que Jarvis ha ejecutado en tu equipo.
+security/audit.log
+
+# Lo que Jarvis escribe cuando se lo pides.
+workspace/
+
+# --- Python ---
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# --- Editores ---
+.vscode/
+.idea/

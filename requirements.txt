@@ -1,0 +1,25 @@
+# --- Núcleo ---
+httpx>=0.27          # Cliente HTTP para hablar con Ollama
+PyYAML>=6.0          # Lectura de la política de seguridad
+psutil>=5.9          # Información del sistema
+python-dotenv>=1.0   # Carga del archivo .env
+numpy>=1.26          # Análisis del espectro de audio
+
+# --- Claude, para las tareas complejas ---
+anthropic>=0.40
+
+# --- Interfaz ---
+PySide6>=6.7
+
+# --- Voz ---
+sounddevice>=0.4       # Micrófono y altavoces
+openwakeword>=0.6      # Detección de "hey Jarvis"
+faster-whisper>=1.0    # Transcripción local en español
+piper-tts>=1.2         # Voz sintética local
+pyttsx3>=2.90          # Respaldo: voces de Windows
+speechbrain>=1.0       # Verificación de locutor (que solo responda a tu voz)
+# torch se instala aparte, en su versión de CPU, que pesa mucho menos:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# --- Pruebas ---
+pytest>=8.0
