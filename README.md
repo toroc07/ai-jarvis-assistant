@@ -232,6 +232,12 @@ de algoritmos. Medido sobre el parecido de la huella vocal —que es lo que de
 verdad decide si te reconoce— mejora +0,019 con ruido y no toca nada sin él.
 Se probó `noisereduce` y salió peor en ambos ejes.
 
+**Un permiso que nadie usa se quita, no se deja "por si acaso".** Llegó a
+haber seis, uno de ellos `ejecutar_comando`, el de más riesgo del proyecto. Hay
+una prueba que falla si vuelve a aparecer alguno. La validación de comandos
+sigue en el guardián, probada y lista para cuando haya una habilidad que de
+verdad la necesite.
+
 **Los chistes van en una colección escrita.** El modelo local los inventa sin
 remate: «un hombre pide un vaso de whisky; el barman dice: lo siento, no tengo
 vaso, pero puedo prepararte un vaso de whisky». Un chiste depende de una frase
@@ -261,12 +267,33 @@ de entorno `OLLAMA_IGPU_ENABLE=1`; sin ella todo corre en CPU. Para comprobarlo,
 
 ## Qué falta
 
-- Clima, búsqueda web general, alarmas y temporizadores
-- Leer tus documentos y PDFs (búsqueda semántica)
-- Calendario, correo, mensajería
+**Funciones**
+
+- Alarmas y temporizadores
+- Búsqueda web general (hoy solo busca en YouTube)
+- Leer tus documentos y PDFs con búsqueda semántica
+- Calendario, correo y mensajería
 - Domótica
-- La palabra clave es «hey Jarvis», no «Jarvis»: es el modelo preentrenado que
-  ofrece openWakeWord, y entrenar uno propio es trabajo aparte
+
+**Deuda conocida**
+
+- El camino de Claude está escrito y enrutado, pero **nunca se ha ejecutado**:
+  sin clave de API no se llega a llamar. El enrutado sí está probado; la llamada
+  en sí, no.
+- La interfaz no tiene pruebas propias más allá de comprobar que construye. Si
+  alguien toca el orbe o los diálogos, nada le avisa de que lo rompió.
+
+**Limitaciones que no se arreglan con más código**
+
+- **Velocidad**: unos 5 segundos hasta la primera palabra, 12-16 si usa una
+  herramienta. Es el techo de un modelo de 8B en gráfica integrada.
+- **La palabra es «hey Jarvis»**, no «Jarvis». Es el modelo preentrenado que
+  ofrece openWakeWord; entrenar uno propio es trabajo aparte y de resultado
+  incierto.
+- **La verificación de voz es floja** con audio corto. Por eso va en dos fases.
+
+---
+
 Jarvis **anota solo** lo que le pides y no sabe hacer, en `data/carencias.jsonl`.
 `python revisar.py` lo enseña agrupado y ordenado por cuántas veces lo has
 pedido, que es una forma bastante honesta de decidir qué construir primero.
@@ -277,7 +304,8 @@ pedido, que es una forma bastante honesta de decidir qué construir primero.
 .\venv\Scripts\python.exe -m pytest tests\ -q
 ```
 
-275 pruebas. Las del guardián cubren los intentos de fuga que importan: salir de
+286 pruebas, y la integración continua las ejecuta en cada cambio. Las del
+guardián cubren los intentos de fuga que importan: salir de
 las carpetas permitidas con `..`, encadenar comandos detrás de uno legítimo,
 llegar a las credenciales, y que Jarvis reescriba su propia política.
 
