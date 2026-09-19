@@ -73,6 +73,9 @@ Cómo te comportas:
   pero SIN dejar de hacer lo que te piden y sin alargarte. Primero resuelves,
   y la gracia va en una frase corta al final, no antes. Si el usuario tiene
   prisa o el asunto es serio, te ahorras la broma.
+- Puede hablarte más de una persona. Cada mensaje viene marcado con quién
+  habla; llámala por su nombre y ten en cuenta que lo que sabes de una no tiene
+  por qué valer para otra.
 - Cuando el usuario te cuente algo duradero sobre él (su nombre, a qué se
   dedica, cómo se llaman los suyos) o te diga cómo quiere que te comportes,
   guárdalo con recordar_dato sin que tenga que pedírtelo. Lo pasajero no: cómo
@@ -180,11 +183,21 @@ class Agente:
             sistema += "\n\n" + hechos
         return sistema
 
-    def _construir_contexto(self, peticion: str) -> list[Mensaje]:
+    def _construir_contexto(
+        self, peticion: str, quien_habla: str = ""
+    ) -> list[Mensaje]:
         mensajes = [Mensaje("system", self._prompt_sistema())]
         for turno in self.memoria.historial(self.sesion, limite=12):
             if turno.rol in ("user", "assistant"):
                 mensajes.append(Mensaje(turno.rol, turno.contenido))
+
+        # Quién habla va en el MENSAJE, no en el prompt de sistema. Es
+        # deliberado: el prompt de sistema es lo que Ollama reaprovecha entre
+        # peticiones, y cambiarlo según quien hable tiraría esa caché cada vez
+        # que se turnasen dos personas, pagando nueve segundos en cada cambio.
+        if quien_habla:
+            peticion = f"[Te habla {quien_habla}] {peticion}"
+
         mensajes.append(Mensaje("user", peticion))
         return mensajes
 
@@ -194,6 +207,7 @@ class Agente:
         pedir_confirmacion: Callable[[Peticion], bool] | None = None,
         al_recibir_texto: Callable[[str], None] | None = None,
         al_usar_herramienta: Callable[[str], None] | None = None,
+        quien_habla: str = "",
     ) -> Resultado:
         """Procesa una petición completa y devuelve la respuesta final.
 
@@ -211,7 +225,7 @@ class Agente:
         fijar_contexto(peticion, self.sesion)
 
         self.memoria.guardar_turno(self.sesion, "user", peticion)
-        mensajes = self._construir_contexto(peticion)
+        mensajes = self._construir_contexto(peticion, quien_habla)
         herramientas = registro.esquemas()
         ejecutadas: list[str] = []
 

@@ -91,6 +91,8 @@ class SesionDeVoz:
         self._fase = Fase.DORMIDO
         self._activa = False
         self._en_conversacion = threading.Event()
+        # Quién abrió la conversación en curso, para dirigirse a esa persona.
+        self._quien_habla = ""
 
     # -- Estado --------------------------------------------------------------
 
@@ -170,7 +172,7 @@ class SesionDeVoz:
             )
             return
 
-        resultado = self.locutor.verificar(
+        resultado = self.locutor.identificar(
             deteccion.audio_previo, es_palabra_clave=True
         )
         if not resultado.es_el_usuario:
@@ -188,15 +190,17 @@ class SesionDeVoz:
                 self.avisos.voz_rechazada(resultado.parecido)
             return
 
+        self._quien_habla = resultado.nombre
         print(
-            f"[voz] Activación ACEPTADA: parecido {resultado.parecido:.3f}, "
+            f"[voz] Activación ACEPTADA ({resultado.nombre or 'sin identificar'}): "
+            f"parecido {resultado.parecido:.3f}, "
             f"listón {self.locutor.umbral - REBAJA_EN_LA_PALABRA_CLAVE:.3f} "
             f"(confianza del wake word {deteccion.confianza:.3f})",
             flush=True,
         )
         self._iniciar_conversacion()
 
-    def abrir_conversacion(self) -> bool:
+    def abrir_conversacion(self, quien: str = "") -> bool:
         """Abre el orbe y empieza a escuchar sin esperar a la palabra clave.
 
         Se usa desde el menú de la bandeja. No se verifica la voz aquí, y es
@@ -208,6 +212,9 @@ class SesionDeVoz:
         """
         if not self._activa or self._en_conversacion.is_set():
             return False
+        # Sin nombre se deja vacío: al abrirlo con el ratón no se sabe quién
+        # es, y la petición completa lo identificará igualmente.
+        self._quien_habla = quien
         self._iniciar_conversacion()
         return True
 
@@ -270,8 +277,12 @@ class SesionDeVoz:
         # ahí sí se distinguen las voces. La de la palabra clave solo decidía
         # si abrir el orbe.
         if self.locutor.configurado:
-            comprobacion = self.locutor.verificar(audio)
-            if not comprobacion.es_el_usuario:
+            comprobacion = self.locutor.identificar(audio)
+            if comprobacion.es_conocido and comprobacion.nombre:
+                # La petición completa identifica mejor que el "hey ...", así
+                # que si aquí se reconoce a otra persona, manda esta.
+                self._quien_habla = comprobacion.nombre
+            if not comprobacion.es_conocido:
                 print(
                     f"[voz] Petición descartada: no es tu voz "
                     f"(parecido {comprobacion.parecido:.3f}, "
@@ -294,7 +305,9 @@ class SesionDeVoz:
         self._cambiar_fase(Fase.PENSANDO)
 
         resultado = self.agente.responder(
-            peticion, pedir_confirmacion=self.avisos.pedir_permiso
+            peticion,
+            pedir_confirmacion=self.avisos.pedir_permiso,
+            quien_habla=self._quien_habla,
         )
         texto = resultado.texto
 
@@ -366,7 +379,7 @@ class SesionDeVoz:
     # -- Registro de voz -----------------------------------------------------
 
     def registrar_voz(
-        self, al_pedir_frase: Callable[[str, int, int], None]
+        self, nombre: str, al_pedir_frase: Callable[[str, int, int], None]
     ) -> tuple[bool, str]:
         """Graba tus frases y guarda tu huella vocal.
 
@@ -388,11 +401,12 @@ class SesionDeVoz:
             return False, "No se grabaron suficientes frases. Inténtalo de nuevo."
 
         try:
-            self.locutor.registrar(grabaciones)
+            self.locutor.registrar(nombre, grabaciones)
         except ValueError as e:
             return False, str(e)
 
+        registrados = ", ".join(self.locutor.nombres)
         return True, (
-            f"Voz registrada con {len(grabaciones)} frases. "
-            "A partir de ahora Jarvis solo te responderá a ti."
+            f"Voz de {nombre} registrada con {len(grabaciones)} frases.\n\n"
+            f"Voces reconocidas: {registrados}."
         )

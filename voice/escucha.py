@@ -16,6 +16,7 @@ Nada de esto sale de tu equipo.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -36,8 +37,32 @@ RUTA_MODELOS = RAIZ / "data" / "voz"
 FRECUENCIA = 16000
 BLOQUE = 1280
 
-# El modelo preentrenado disponible es "hey jarvis", no "jarvis" a secas.
-PALABRA = "hey_jarvis"
+# PALABRAS DE ACTIVACIÓN DISPONIBLES
+#
+# openWakeWord trae estos modelos preentrenados y NO se pueden inventar otros:
+# cada uno es una red entrenada con miles de grabaciones de esa frase concreta.
+# Si quieres activar el asistente con otro nombre, hay que entrenar un modelo
+# propio (openWakeWord publica el procedimiento) y apuntar a su archivo .onnx
+# con JARVIS_PALABRA_CLAVE.
+#
+# Ojo: todas son en inglés, así que se pronuncian como en inglés aunque luego
+# le hables en español.
+PALABRAS_DISPONIBLES = {
+    "hey_jarvis": "hey Jarvis",
+    "alexa": "Alexa",
+    "hey_mycroft": "hey Mycroft",
+    "hey_rhasspy": "hey Rhasspy",
+}
+
+# Cuál se usa. Puede ser una de las de arriba o la ruta a un .onnx propio.
+PALABRA = os.getenv("JARVIS_PALABRA_CLAVE", "hey_jarvis").strip() or "hey_jarvis"
+
+
+def nombre_de_la_palabra() -> str:
+    """Cómo se dice en voz alta la palabra configurada, para los mensajes."""
+    if PALABRA in PALABRAS_DISPONIBLES:
+        return PALABRAS_DISPONIBLES[PALABRA]
+    return Path(PALABRA).stem.replace("_", " ")
 
 # Confianza mínima del detector, de 0 a 1. Por debajo de 0,5 salta con ruidos
 # parecidos; por encima de 0,7 hay que vocalizar demasiado.
@@ -92,6 +117,7 @@ class Oido:
         self.dispositivo = dispositivo
 
         self._detector = None
+        self._clave_prediccion = PALABRA
         self._transcriptor = None
         self._escuchando = False
         self._hilo: threading.Thread | None = None
@@ -120,9 +146,26 @@ class Oido:
         from openwakeword.model import Model
 
         RUTA_MODELOS.mkdir(parents=True, exist_ok=True)
-        self._detector = Model(
-            wakeword_models=[PALABRA], inference_framework="onnx"
-        )
+
+        # Si PALABRA es una ruta a un .onnx propio se usa tal cual; si es uno de
+        # los nombres conocidos, openWakeWord lo resuelve solo.
+        modelo = PALABRA
+        ruta_propia = Path(PALABRA)
+        if ruta_propia.suffix == ".onnx":
+            if not ruta_propia.is_file():
+                raise FileNotFoundError(
+                    f"No existe el modelo de palabra clave: {ruta_propia}. "
+                    f"Usa uno de {sorted(PALABRAS_DISPONIBLES)} o corrige la "
+                    "ruta en JARVIS_PALABRA_CLAVE."
+                )
+            modelo = str(ruta_propia)
+
+        self._detector = Model(wakeword_models=[modelo], inference_framework="onnx")
+
+        # openWakeWord nombra la predicción por el nombre del archivo, que no
+        # tiene por qué coincidir con lo que se configuró. Se guarda el nombre
+        # real para leer la predicción correcta.
+        self._clave_prediccion = next(iter(self._detector.models), PALABRA)
         return self._detector
 
     def _obtener_transcriptor(self):
@@ -246,7 +289,7 @@ class Oido:
                     al_recibir_audio(muestras.astype(np.float32) / 32768.0)
 
                 predicciones = detector.predict(muestras)
-                confianza = predicciones.get(PALABRA, 0.0)
+                confianza = predicciones.get(self._clave_prediccion, 0.0)
 
                 # Se anota lo más cerca que se ha estado del umbral en el
                 # último minuto. Sin esto no hay forma de distinguir "no te

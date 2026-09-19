@@ -12,6 +12,7 @@ from PySide6.QtCore import QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QDialog,
     QLabel,
+    QLineEdit,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
@@ -24,14 +25,16 @@ class Registrador(QThread):
     frase_pedida = Signal(str, int, int)
     terminado = Signal(bool, str)
 
-    def __init__(self, sesion) -> None:
+    def __init__(self, sesion, nombre: str) -> None:
         super().__init__()
         self.sesion = sesion
+        self.nombre = nombre
 
     def run(self) -> None:
         try:
             ok, mensaje = self.sesion.registrar_voz(
-                al_pedir_frase=lambda f, i, n: self.frase_pedida.emit(f, i, n)
+                self.nombre,
+                al_pedir_frase=lambda f, i, n: self.frase_pedida.emit(f, i, n),
             )
             self.terminado.emit(ok, mensaje)
         except Exception as e:
@@ -44,30 +47,40 @@ class DialogoRegistroVoz(QDialog):
         self.sesion = sesion
         self.registrador: Registrador | None = None
 
-        self.setWindowTitle("Enseñarle tu voz a Jarvis")
+        self.setWindowTitle("Registrar una voz")
         self.setMinimumWidth(480)
 
         disposicion = QVBoxLayout(self)
         disposicion.setSpacing(16)
         disposicion.setContentsMargins(24, 22, 24, 20)
 
-        titulo = QLabel("Que Jarvis solo te responda a ti")
+        titulo = QLabel("Registrar una voz")
         titulo.setStyleSheet("font-size: 16px; font-weight: 600;")
         disposicion.addWidget(titulo)
 
         self.explicacion = QLabel(
-            "Vas a leer cinco frases en voz alta. Con ellas Jarvis aprende cómo "
-            "suena tu voz y podrá ignorar a los demás.\n\n"
+            "Escribe tu nombre y lee cinco frases en voz alta. Con ellas se "
+            "aprende cómo suena tu voz, para reconocerte y llamarte por tu "
+            "nombre.\n\n"
             "Habla como hablas normalmente, a la distancia habitual del "
             "micrófono y en un sitio sin ruido. Cada frase se graba sola: "
             "empieza a leer cuando aparezca y calla al terminar.\n\n"
-            "Esto evita que te lo activen otras personas o la televisión, pero "
-            "no es una contraseña: una grabación tuya podría engañarlo. Por eso "
-            "las acciones que tocan tu equipo te las seguirá preguntando."
+            "Esto evita que lo activen personas no registradas o la televisión, "
+            "pero no es una contraseña: una grabación podría engañarlo. Por eso "
+            "las acciones que tocan el equipo se seguirán preguntando."
         )
         self.explicacion.setWordWrap(True)
         self.explicacion.setStyleSheet("color: #9aa0a6;")
         disposicion.addWidget(self.explicacion)
+
+        self.nombre = QLineEdit()
+        self.nombre.setPlaceholderText("Tu nombre, por ejemplo: Carlos")
+        self.nombre.setStyleSheet(
+            "background: #22242a; border: 1px solid #32353d; border-radius: 8px; "
+            "padding: 10px 12px; font-size: 14px;"
+        )
+        self.nombre.returnPressed.connect(self.empezar)
+        disposicion.addWidget(self.nombre)
 
         self.frase = QLabel("")
         self.frase.setWordWrap(True)
@@ -88,6 +101,17 @@ class DialogoRegistroVoz(QDialog):
         disposicion.addWidget(self.boton)
 
     def empezar(self) -> None:
+        nombre = self.nombre.text().strip()
+        if not nombre:
+            self.explicacion.setText(
+                "Escribe primero un nombre: es como te llamará y cómo se "
+                "distingue tu voz de las demás."
+            )
+            self.explicacion.setStyleSheet("color: #e8a33d;")
+            self.nombre.setFocus()
+            return
+
+        self.nombre.setEnabled(False)
         self.boton.setEnabled(False)
         self.boton.setText("Grabando...")
         self.explicacion.setText(
@@ -99,7 +123,7 @@ class DialogoRegistroVoz(QDialog):
         self.progreso.setVisible(True)
         self.progreso.setRange(0, 0)  # Indeterminado mientras carga el modelo.
 
-        self.registrador = Registrador(self.sesion)
+        self.registrador = Registrador(self.sesion, nombre)
         self.registrador.frase_pedida.connect(self.mostrar_frase)
         self.registrador.terminado.connect(self.al_terminar)
         self.registrador.start()
@@ -120,6 +144,7 @@ class DialogoRegistroVoz(QDialog):
             "color: #5aa87a;" if ok else "color: #e8a33d;"
         )
         self.boton.setEnabled(True)
+        self.nombre.setEnabled(not ok)
         self.boton.setText("Cerrar" if ok else "Reintentar")
         self.boton.clicked.disconnect()
         self.boton.clicked.connect(self.accept if ok else self.empezar)

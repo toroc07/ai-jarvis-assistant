@@ -87,23 +87,24 @@ class TestUmbralDeVoz:
         assert locutor.UMBRAL_MINIMO < locutor.UMBRAL_MAXIMO
         assert locutor.UMBRAL_MINIMO <= locutor.UMBRAL <= locutor.UMBRAL_MAXIMO
 
-    def test_sin_huella_no_se_bloquea_al_usuario(self) -> None:
-        """Sin configurar, Jarvis debe responder en vez de quedarse mudo."""
+    def test_sin_perfiles_no_se_bloquea_a_nadie(self) -> None:
+        """Sin configurar debe responder, en vez de quedarse mudo."""
         import numpy as np
 
         l = locutor.Locutor()
-        l._huella = None
-        resultado = l.verificar(np.zeros(16000, dtype=np.float32))
-        assert resultado.es_el_usuario
+        l.perfiles = []
+        assert l.identificar(np.zeros(16000, dtype=np.float32)).es_conocido
 
     def test_un_audio_muy_corto_se_rechaza(self) -> None:
         """Medio segundo no da para una huella fiable; el parecido sale al azar."""
         import numpy as np
 
         l = locutor.Locutor()
-        l._huella = np.ones(192, dtype=np.float32)
-        resultado = l.verificar(np.zeros(1000, dtype=np.float32))
-        assert not resultado.es_el_usuario
+        l.perfiles = [
+            locutor.Perfil("Prueba", np.ones(192, dtype=np.float32), 0.7)
+        ]
+        resultado = l.identificar(np.zeros(1000, dtype=np.float32))
+        assert not resultado.es_conocido
         assert "corto" in resultado.motivo
 
 

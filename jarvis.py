@@ -64,7 +64,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QSystemTrayIcon,
 )
 
-from core.agent import Agente  # noqa: E402
+from core.agent import NOMBRE_ASISTENTE, Agente  # noqa: E402
 from ui.bandeja import Bandeja  # noqa: E402
 from ui.controlador_voz import ControladorVoz  # noqa: E402
 from ui.registro_voz import DialogoRegistroVoz  # noqa: E402
@@ -73,7 +73,7 @@ from ui.ventana import Ventana  # noqa: E402
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Jarvis")
+    app.setApplicationName(NOMBRE_ASISTENTE)
     # Sin esto, Qt cerraría el programa al esconderse la última ventana, que es
     # justo lo contrario de quedarse en segundo plano escuchando.
     app.setQuitOnLastWindowClosed(False)
@@ -118,7 +118,9 @@ def main() -> int:
     latido.timeout.connect(lambda: None)
     app.latido = latido  # type: ignore[attr-defined]
     voz.escuchando.connect(
-        lambda: ventana.anotar_aviso("Ya te escucho: di «hey Jarvis».")
+        lambda: ventana.anotar_aviso(
+            f"Ya te escucho: di «{__import__('voice.escucha', fromlist=['x']).nombre_de_la_palabra()}»."
+        )
     )
     voz.preparada.connect(
         lambda motor: ventana.anotar_aviso(f"Voz y transcripción listas ({motor}).")

@@ -40,8 +40,8 @@ ollama pull qwen3:8b
 copy .env.example .env
 ```
 
-Abre `.env` y pon tu nombre en `JARVIS_USUARIO`. Lo demás ya viene con valores
-que funcionan.
+Lo demás ya viene con valores que funcionan. En `.env` puedes cambiar cómo se
+llama el asistente y con qué palabra se despierta.
 
 La primera vez que arranques se descargan solos los modelos de voz (unos
 250 MB: el detector de la palabra clave, Whisper para transcribir, Piper para
@@ -135,11 +135,22 @@ aunque siga conversando.
   minutos. Un intento suelto es el modelo equivocándose; varios seguidos son
   otra cosa, y da igual si es un fallo suyo o alguien manipulándolo.
 
-### Que solo te responda a ti
+### Que solo responda a quien tú digas
 
-Lees cinco frases, se extrae de cada una un vector de 192 números con
-ECAPA-TDNN que resume cómo suena tu voz, y se guarda la media. En cada
-activación se compara.
+Caben **tres personas**, cada una con su nombre. Lees cinco frases, se extrae de
+cada una un vector de 192 números con ECAPA-TDNN que resume cómo suena tu voz, y
+se guarda la media. En cada activación se compara con todos los perfiles y gana
+el más parecido, así el asistente sabe a quién responde y te llama por tu
+nombre.
+
+Se gestionan desde el menú de la bandeja: registrar una voz, ver las
+reconocidas, olvidar a alguien. Sin ninguna registrada responde a cualquiera,
+que es el estado inicial.
+
+Un detalle de diseño: **quién habla viaja en el mensaje, no en el prompt de
+sistema**. El prompt de sistema es lo que Ollama reaprovecha entre peticiones, y
+cambiarlo según quien hable tiraría esa caché cada vez que dos personas se
+turnasen, pagando nueve segundos en cada cambio.
 
 Es un **filtro de conveniencia, no autenticación**: evita que te lo activen
 otras personas o la televisión, pero una grabación de buena calidad podría
@@ -287,9 +298,11 @@ de entorno `OLLAMA_IGPU_ENABLE=1`; sin ella todo corre en CPU. Para comprobarlo,
 
 - **Velocidad**: unos 5 segundos hasta la primera palabra, 12-16 si usa una
   herramienta. Es el techo de un modelo de 8B en gráfica integrada.
-- **La palabra es «hey Jarvis»**, no «Jarvis». Es el modelo preentrenado que
-  ofrece openWakeWord; entrenar uno propio es trabajo aparte y de resultado
-  incierto.
+- **La palabra de activación no es libre.** Solo hay cuatro modelos
+  preentrenados (`hey Jarvis`, `Alexa`, `hey Mycroft`, `hey Rhasspy`) y todos
+  en inglés. El nombre del asistente sí es libre: puedes llamarlo Paco y
+  despertarlo diciendo «Alexa». Para una palabra propia hay que entrenar un
+  modelo, que es trabajo aparte y de resultado incierto.
 - **La verificación de voz es floja** con audio corto. Por eso va en dos fases.
 
 ---

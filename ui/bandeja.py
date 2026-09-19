@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+from core.agent import NOMBRE_ASISTENTE
 from security.parada import interruptor
 
 
@@ -44,7 +45,11 @@ class Bandeja(QSystemTrayIcon):
         super().__init__(_icono())
         self.ventana = ventana
         self.voz = voz
-        self.setToolTip("Jarvis — di «hey Jarvis» para hablarle")
+        from voice.escucha import nombre_de_la_palabra
+
+        self.setToolTip(
+            f"{NOMBRE_ASISTENTE} — di «{nombre_de_la_palabra()}» para hablarle"
+        )
 
         menu = QMenu()
 
@@ -56,20 +61,19 @@ class Bandeja(QSystemTrayIcon):
             # Abrir el orbe a mano, para hablarle sin decir la palabra clave:
             # útil si estás en una llamada, con ruido, o simplemente no quieres
             # hablarle en alto para activarlo.
-            self.accion_orbe = QAction("Hablar con Jarvis", menu)
+            self.accion_orbe = QAction(f"Hablar con {NOMBRE_ASISTENTE}", menu)
             self.accion_orbe.triggered.connect(self.abrir_orbe)
             menu.addAction(self.accion_orbe)
 
         if voz is not None:
             menu.addSeparator()
 
-            self.accion_voz = QAction("Enseñarle mi voz", menu)
+            self.accion_voz = QAction("Registrar una voz", menu)
             self.accion_voz.triggered.connect(self.registrar_voz)
             menu.addAction(self.accion_voz)
 
-            self.accion_olvidar = QAction("Olvidar mi voz", menu)
-            self.accion_olvidar.triggered.connect(self.olvidar_voz)
-            menu.addAction(self.accion_olvidar)
+            # Submenú con las voces registradas, para poder quitarlas una a una.
+            self.menu_voces = menu.addMenu("Voces reconocidas")
 
             # Con el orbe en pantalla, esta es la salida sin tener que hablar.
             self.accion_cerrar_orbe = QAction("Cerrar el orbe", menu)
@@ -87,7 +91,7 @@ class Bandeja(QSystemTrayIcon):
 
         menu.addSeparator()
 
-        salir = QAction("Apagar Jarvis", menu)
+        salir = QAction(f"Apagar {NOMBRE_ASISTENTE}", menu)
         salir.triggered.connect(self.salir)
         menu.addAction(salir)
 
@@ -132,30 +136,71 @@ class Bandeja(QSystemTrayIcon):
         self.accion_orbe.setEnabled(not abierta)
         self.accion_cerrar_orbe.setEnabled(abierta)
 
-        configurada = self.voz.voz_configurada
+        self._actualizar_voces()
+
+    def _actualizar_voces(self) -> None:
+        """Rehace el submenú con las voces que hay registradas ahora."""
+        from voice.locutor import MAX_PERFILES
+
+        locutor = self.voz.sesion.locutor
+        nombres = locutor.nombres
+
+        self.accion_voz.setEnabled(locutor.hay_sitio)
         self.accion_voz.setText(
-            "Volver a enseñarle mi voz" if configurada else "Enseñarle mi voz"
+            "Registrar una voz"
+            if locutor.hay_sitio
+            else f"Registrar una voz (lleno: {MAX_PERFILES})"
         )
-        self.accion_olvidar.setEnabled(configurada)
+
+        self.menu_voces.clear()
+        self.menu_voces.setTitle(
+            f"Voces reconocidas ({len(nombres)} de {MAX_PERFILES})"
+        )
+
+        if not nombres:
+            vacio = QAction("Ninguna: responde a cualquiera", self.menu_voces)
+            vacio.setEnabled(False)
+            self.menu_voces.addAction(vacio)
+            return
+
+        for nombre in nombres:
+            accion = QAction(f"Olvidar a {nombre}", self.menu_voces)
+            accion.triggered.connect(
+                lambda _=False, n=nombre: self.olvidar_voz(n)
+            )
+            self.menu_voces.addAction(accion)
 
     def registrar_voz(self) -> None:
         from ui.registro_voz import DialogoRegistroVoz
 
         DialogoRegistroVoz(self.voz.sesion, self.ventana).exec()
+        self._actualizar_voces()
 
-    def olvidar_voz(self) -> None:
+    def olvidar_voz(self, nombre: str) -> None:
         from PySide6.QtWidgets import QMessageBox
 
+        from voice.escucha import nombre_de_la_palabra
+
+        locutor = self.voz.sesion.locutor
+
+        aviso = f"Se borrará la huella vocal de {nombre}."
+        if len(locutor.nombres) <= 1:
+            # Quedarse sin ninguna voz devuelve el asistente al estado abierto,
+            # y eso conviene decirlo antes y no descubrirlo después.
+            aviso += (
+                "\n\nEs la última que queda, así que volverá a responder a "
+                f"cualquiera que diga «{nombre_de_la_palabra()}»."
+            )
+
         respuesta = QMessageBox.question(
-            self.ventana,
-            "Olvidar mi voz",
-            "Jarvis olvidará tu huella vocal y volverá a responder a cualquier "
-            "voz que diga «hey Jarvis».\n\n¿Seguro?",
+            self.ventana, "Olvidar una voz", aviso + "\n\n¿Seguro?"
         )
-        if respuesta == QMessageBox.Yes:
-            self.voz.sesion.locutor.olvidar()
+        if respuesta != QMessageBox.Yes:
+            return
+
+        if locutor.olvidar(nombre):
             self.showMessage(
-                "Jarvis", "Huella vocal borrada.", _icono(), 4000
+                "Jarvis", f"Voz de {nombre} borrada.", _icono(), 4000
             )
 
     def _al_pulsar(self, motivo) -> None:
