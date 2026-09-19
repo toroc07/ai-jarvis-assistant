@@ -174,3 +174,96 @@ def crear_carpeta(ruta: str) -> str:
         return f"La carpeta {carpeta} ya existe."
     carpeta.mkdir(parents=True)
     return f"Carpeta creada: {carpeta}"
+
+
+@registro.registrar(
+    nombre="copiar_archivo",
+    descripcion=(
+        "Copia un archivo a otra ubicación, dejando el original donde estaba."
+    ),
+    accion="copiar_archivo",
+    parametros={
+        "origen": {"type": "string", "description": "Archivo que se quiere copiar."},
+        "destino": {"type": "string", "description": "Dónde dejar la copia."},
+    },
+    campo_objetivo="destino",
+)
+def copiar_archivo(origen: str, destino: str) -> str:
+    # El guardián valida el destino, que es donde se escribe. El origen se
+    # comprueba aparte contra las rutas de LECTURA: copiar algo implica leerlo,
+    # y sin esta comprobación se podría sacar un archivo de una zona prohibida
+    # copiándolo a una permitida.
+    from security.guard import Peticion, guardian
+
+    ruta_origen = Path(origen).expanduser().resolve()
+    veredicto = guardian.evaluar(
+        Peticion(accion="leer_archivo", objetivo=str(ruta_origen))
+    )
+    if not veredicto.permitida:
+        return f"No puedo leer el origen: {veredicto.razon}"
+
+    if not ruta_origen.is_file():
+        return f"No existe el archivo: {ruta_origen}"
+
+    ruta_destino = Path(destino).expanduser().resolve()
+    if ruta_destino.is_dir():
+        ruta_destino = ruta_destino / ruta_origen.name
+
+    ruta_destino.parent.mkdir(parents=True, exist_ok=True)
+
+    # Si el destino ya existe se guarda copia antes de pisarlo, igual que al
+    # escribir: una copia nunca debería destruir algo sin dejar rastro.
+    if ruta_destino.exists():
+        PAPELERA.mkdir(parents=True, exist_ok=True)
+        marca = datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(ruta_destino, PAPELERA / f"{ruta_destino.stem}.{marca}{ruta_destino.suffix}")
+
+    shutil.copy2(ruta_origen, ruta_destino)
+    return f"Copiado a {ruta_destino}."
+
+
+@registro.registrar(
+    nombre="mover_archivo",
+    descripcion=(
+        "Mueve un archivo a otra ubicación, o lo renombra. El original deja de "
+        "estar donde estaba."
+    ),
+    accion="mover_archivo",
+    parametros={
+        "origen": {"type": "string", "description": "Archivo que se quiere mover."},
+        "destino": {"type": "string", "description": "Dónde dejarlo."},
+    },
+    campo_objetivo="destino",
+)
+def mover_archivo(origen: str, destino: str) -> str:
+    # Mover ELIMINA el original de su sitio, así que el origen se valida contra
+    # las rutas de ESCRITURA, no las de lectura. Es más estricto que copiar a
+    # propósito: aquí sí se pierde algo del sitio de partida.
+    from security.guard import Peticion, guardian
+
+    ruta_origen = Path(origen).expanduser().resolve()
+    veredicto = guardian.evaluar(
+        Peticion(accion="borrar_archivo", objetivo=str(ruta_origen))
+    )
+    if veredicto.decision.value == "denegado":
+        return f"No puedo sacar el archivo de ahí: {veredicto.razon}"
+
+    if not ruta_origen.is_file():
+        return f"No existe el archivo: {ruta_origen}"
+
+    ruta_destino = Path(destino).expanduser().resolve()
+    if ruta_destino.is_dir():
+        ruta_destino = ruta_destino / ruta_origen.name
+
+    ruta_destino.parent.mkdir(parents=True, exist_ok=True)
+
+    if ruta_destino.exists():
+        PAPELERA.mkdir(parents=True, exist_ok=True)
+        marca = datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.move(
+            str(ruta_destino),
+            str(PAPELERA / f"{ruta_destino.stem}.{marca}{ruta_destino.suffix}"),
+        )
+
+    shutil.move(str(ruta_origen), str(ruta_destino))
+    return f"Movido a {ruta_destino}."

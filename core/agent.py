@@ -33,6 +33,7 @@ from skills.registro import registro
 # Se importan por su efecto: al cargarse, se registran en el registro global.
 import skills.archivos  # noqa: F401
 import skills.carencias  # noqa: F401
+import skills.clima  # noqa: F401
 import skills.conversacion  # noqa: F401
 import skills.humor  # noqa: F401
 import skills.memoria  # noqa: F401
