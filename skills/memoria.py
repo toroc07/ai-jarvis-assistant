@@ -80,14 +80,10 @@ def normalizar_clave(clave: str) -> str:
 @registro.registrar(
     nombre="recordar_dato",
     descripcion=(
-        "Guarda un dato duradero sobre el usuario para recordarlo en futuras "
-        "conversaciones. Úsala cuando te cuente algo estable sobre sí mismo "
-        "(su nombre, a qué se dedica, cómo se llaman sus allegados, dónde "
-        "vive) o cuando te diga cómo quiere que te comportes ('llámame por mi "
-        "nombre', 'respóndeme más corto'). También cuando te pida "
-        "explícitamente que recuerdes algo. NO la uses para cosas pasajeras "
-        "como el tiempo que hace hoy o cómo se siente ahora mismo, ni para "
-        "guardar lo que ya se ha dicho en esta conversación."
+        "Guarda un dato duradero sobre el usuario: su nombre, trabajo, "
+        "familia, dónde vive, o cómo quiere que te comportes. También si te "
+        "pide que recuerdes algo de él. NO para cosas pasajeras (el tiempo, "
+        "cómo se siente hoy) ni para tareas o notas: eso es tomar_nota."
     ),
     accion="recordar_dato",
     parametros={

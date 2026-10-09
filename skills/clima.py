@@ -94,9 +94,9 @@ def _ciudad_guardada() -> str:
 @registro.registrar(
     nombre="consultar_clima",
     descripcion=(
-        "Dice qué tiempo hace. Úsala cuando pregunten por el tiempo, la "
-        "temperatura, si llueve o si hace falta abrigo. Si no dicen la ciudad, "
-        "omite el parámetro y se usará la que el usuario tenga guardada."
+        "El tiempo de hoy y la previsión de los próximos días: temperatura, "
+        "lluvia, si hace falta abrigo, qué tiempo hará mañana. Sin ciudad, "
+        "usa la que el usuario tenga guardada."
     ),
     accion="clima",
     parametros={
@@ -104,12 +104,22 @@ def _ciudad_guardada() -> str:
             "type": "string",
             "description": "Ciudad de la que consultar el tiempo.",
             "requerido": False,
-        }
+        },
+        "dias": {
+            "type": "integer",
+            "description": (
+                "Cuántos días de previsión, de 1 a 7. 1 es solo hoy; para "
+                "'mañana' usa 2; para 'el fin de semana' o 'esta semana', 7."
+            ),
+            "requerido": False,
+        },
     },
     campo_objetivo="ciudad",
 )
-def consultar_clima(ciudad: str = "") -> str:
+def consultar_clima(ciudad: str = "", dias: int = 1) -> str:
     import httpx
+
+    dias = min(max(int(dias or 1), 1), 7)
 
     ciudad = (ciudad or "").strip() or _ciudad_guardada()
     if not ciudad:
@@ -132,8 +142,11 @@ def consultar_clima(ciudad: str = "") -> str:
                 "latitude": lat,
                 "longitude": lon,
                 "current": "temperature_2m,apparent_temperature,weather_code",
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-                "forecast_days": 1,
+                "daily": (
+                    "weather_code,temperature_2m_max,temperature_2m_min,"
+                    "precipitation_probability_max"
+                ),
+                "forecast_days": dias,
                 "timezone": "auto",
             },
             timeout=15.0,
@@ -169,4 +182,38 @@ def consultar_clima(ciudad: str = "") -> str:
     if lluvia is not None and lluvia >= 30:
         partes.append(f", con un {lluvia:.0f} por ciento de probabilidad de lluvia")
 
-    return "".join(partes) + "."
+    texto = "".join(partes) + "."
+    siguientes = _proximos_dias(hoy)
+    if siguientes:
+        texto += "\nPróximos días:\n" + "\n".join(siguientes)
+    return texto
+
+
+_DIAS_SEMANA = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
+
+def _proximos_dias(diario: dict) -> list[str]:
+    """Una línea por día a partir de mañana, para leerla en voz alta."""
+    from datetime import date
+
+    fechas = diario.get("time") or []
+    lineas = []
+    for i, fecha in enumerate(fechas[1:], start=1):
+        try:
+            dia = date.fromisoformat(fecha)
+            maxima = diario["temperature_2m_max"][i]
+            minima = diario["temperature_2m_min"][i]
+        except (ValueError, KeyError, IndexError, TypeError):
+            continue
+        if maxima is None or minima is None:
+            continue
+        nombre = "mañana" if i == 1 else f"el {_DIAS_SEMANA[dia.weekday()]} {dia.day}"
+        codigo = (diario.get("weather_code") or [None] * len(fechas))[i]
+        linea = f"{nombre.capitalize()}: entre {minima:.0f} y {maxima:.0f} grados"
+        if codigo is not None:
+            linea += f", {_describir(codigo)}"
+        lluvia = (diario.get("precipitation_probability_max") or [None] * len(fechas))[i]
+        if lluvia is not None and lluvia >= 30:
+            linea += f", {lluvia:.0f}% de probabilidad de lluvia"
+        lineas.append(linea + ".")
+    return lineas

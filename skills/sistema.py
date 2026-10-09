@@ -180,7 +180,11 @@ def hora_fecha() -> str:
 
 @registro.registrar(
     nombre="info_sistema",
-    descripcion="Informa del estado del equipo: disco libre, memoria y sistema.",
+    descripcion=(
+        "Informa del estado del equipo: batería, conexión de red, uso de "
+        "procesador y memoria, disco libre y cuánto lleva encendido. Úsala "
+        "para '¿cuánta batería me queda?', '¿tengo internet?' o '¿cómo va el PC?'."
+    ),
     accion="info_sistema",
     parametros={},
 )
@@ -193,16 +197,68 @@ def info_sistema() -> str:
     ]
     try:
         import psutil
-
-        mem = psutil.virtual_memory()
-        lineas.append(
-            f"Memoria: {mem.available / 1024**3:.1f} GB libres de "
-            f"{mem.total / 1024**3:.1f} GB ({mem.percent:.0f}% en uso)"
-        )
-        lineas.append(f"CPU: {psutil.cpu_percent(interval=0.3):.0f}% de uso")
     except ImportError:
-        pass
+        return "\n".join(lineas)
+
+    mem = psutil.virtual_memory()
+    lineas.append(
+        f"Memoria: {mem.available / 1024**3:.1f} GB libres de "
+        f"{mem.total / 1024**3:.1f} GB ({mem.percent:.0f}% en uso)"
+    )
+    lineas.append(f"CPU: {psutil.cpu_percent(interval=0.3):.0f}% de uso")
+    lineas.append(_bateria(psutil))
+    lineas.append(_red(psutil))
+
+    encendido = datetime.now() - datetime.fromtimestamp(psutil.boot_time())
+    horas, segundos = divmod(int(encendido.total_seconds()), 3600)
+    dias, horas = divmod(horas, 24)
+    lineas.append(
+        "Encendido desde hace "
+        + (f"{dias} d " if dias else "")
+        + f"{horas} h {segundos // 60} min"
+    )
     return "\n".join(lineas)
+
+
+def _bateria(psutil) -> str:
+    try:
+        bateria = psutil.sensors_battery()
+    except Exception:
+        bateria = None
+    if bateria is None:
+        return "Batería: no hay (equipo de sobremesa o no se puede leer)"
+    estado = "cargando" if bateria.power_plugged else "sin cargador"
+    texto = f"Batería: {bateria.percent:.0f}%, {estado}"
+    # psutil da valores especiales cuando no sabe cuánto queda.
+    if not bateria.power_plugged and 0 < bateria.secsleft < 48 * 3600:
+        horas, resto = divmod(int(bateria.secsleft), 3600)
+        texto += f", quedan unas {horas} h {resto // 60} min"
+    return texto
+
+
+def _red(psutil) -> str:
+    """Por qué conexión saldría el equipo a internet.
+
+    Listar los adaptadores activos no sirve: salen VPN, túneles y virtuales.
+    Se pregunta al sistema qué dirección local usaría para llegar fuera. Un
+    socket UDP 'conectado' no envía ningún paquete, así que no sale nada.
+    """
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip_local = s.getsockname()[0]
+    except OSError:
+        return "Red: sin conexión (no hay ruta hacia internet)"
+
+    try:
+        for nombre, direcciones in psutil.net_if_addrs().items():
+            if any(d.address == ip_local for d in direcciones):
+                return f"Red: conectado por {nombre} ({ip_local})"
+    except Exception:
+        pass
+    return f"Red: conectado ({ip_local})"
 
 
 @registro.registrar(

@@ -21,14 +21,11 @@ from skills.registro import registro
 @registro.registrar(
     nombre="anotar_carencia",
     descripcion=(
-        "Anota que el usuario ha pedido algo que no sabes hacer, para que se "
-        "estudie añadirlo más adelante. Úsala SIEMPRE que te pidan una acción "
-        "para la que no tienes herramienta: poner alarmas, leer el correo, "
-        "controlar luces, enviar mensajes, o cualquier otra cosa que no esté "
-        "en tu lista. Anótala primero y después dile al usuario con naturalidad "
-        "que todavía no sabes hacerlo pero que ha quedado apuntado. No la uses "
-        "si sí tienes una herramienta para ello, ni para preguntas de "
-        "conocimiento que puedes responder hablando."
+        "Anota una acción que te piden y para la que NO tienes ninguna "
+        "herramienta (leer el correo, controlar luces, enviar mensajes...). "
+        "Anótala y luego di con naturalidad que aún no sabes hacerlo. No la "
+        "uses si alguna herramienta sirve, ni para preguntas que puedes "
+        "responder hablando."
     ),
     accion="anotar_carencia",
     parametros={
@@ -36,8 +33,11 @@ from skills.registro import registro
             "type": "string",
             "description": (
                 "Qué capacidad falta, en pocas palabras y en infinitivo. "
-                "Por ejemplo: 'poner alarmas y temporizadores', 'leer el "
-                "correo', 'encender luces inteligentes'."
+                # Los ejemplos deben ser cosas que de verdad no sabe hacer: el
+                # modelo los lee como una lista de lo que NO puede hacer. Aquí
+                # ponía "poner alarmas y temporizadores", y cuando los hubo se
+                # negaba a usarlos e inventaba una herramienta con ese nombre.
+                "Por ejemplo: 'leer el correo', 'encender luces inteligentes'."
             ),
         },
         "detalle": {

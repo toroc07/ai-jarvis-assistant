@@ -8,7 +8,11 @@ política. Aquí solo va la operación en sí.
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import shutil
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -19,10 +23,103 @@ from skills.registro import registro
 # decides después. Es la diferencia entre un error molesto y uno grave.
 PAPELERA = Path(__file__).resolve().parent.parent / "data" / "papelera"
 
+# Lo que se lee vuelve entero al modelo. Un archivo de varios MB desbordaría su
+# contexto y la respuesta se iría a la basura, así que se corta y se avisa.
+MAX_CARACTERES_LECTURA = 20_000
+
+# Tope de lo que se puede escribir de una vez (en caracteres).
+MAX_CARACTERES_ESCRITURA = 1_000_000
+
+# Límites de búsqueda: sin ellos, buscar en Documentos recorría entornos
+# virtuales enteros y podía tardar minutos.
+MAX_RESULTADOS_BUSQUEDA = 50
+MAX_SEGUNDOS_BUSQUEDA = 5.0
+_CARPETAS_QUE_NO_SE_RECORREN = {
+    "venv", ".venv", ".git", "node_modules", "__pycache__", ".pytest_cache"
+}
+
+
+def _nombre_en_papelera(archivo: Path) -> Path:
+    """Dónde guardar 'archivo' en la papelera sin pisar otro del mismo nombre."""
+    PAPELERA.mkdir(parents=True, exist_ok=True)
+    marca = datetime.now().strftime("%Y%m%d-%H%M%S")
+    # La marca de tiempo sola chocaba si dos archivos con el mismo nombre se
+    # retiraban en el mismo segundo, y el segundo pisaba al primero.
+    return PAPELERA / f"{archivo.stem}.{marca}-{uuid.uuid4().hex[:6]}{archivo.suffix}"
+
+
+def _destino_final_permitido(ruta: Path) -> str | None:
+    """Comprueba el archivo de destino ya con su nombre definitivo.
+
+    Al copiar o mover a una carpeta, el guardián solo vio la carpeta. Aquí se
+    valida el archivo concreto que se va a crear (su extensión, sobre todo).
+    """
+    from security.guard import Decision, Peticion, guardian
+
+    veredicto = guardian.evaluar(Peticion(accion="escribir_archivo", objetivo=str(ruta)))
+    if veredicto.decision is Decision.DENEGADO:
+        return veredicto.razon
+    return None
+
+
+class _ErrorDeDocumento(Exception):
+    """Un PDF o Word que no se ha podido abrir; el mensaje es para el modelo."""
+
+
+def _texto_de_pdf(archivo: Path) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        raise _ErrorDeDocumento("falta la librería pypdf (pip install pypdf).")
+    try:
+        lector = PdfReader(str(archivo))
+        if lector.is_encrypted:
+            raise _ErrorDeDocumento("está protegido con contraseña.")
+        paginas = []
+        total = 0
+        for numero, pagina in enumerate(lector.pages, 1):
+            texto = pagina.extract_text() or ""
+            paginas.append(f"[Página {numero}]\n{texto.strip()}")
+            total += len(texto)
+            # No tiene sentido extraer cien páginas si solo se van a mostrar
+            # las primeras: el recorte posterior las tiraría igualmente.
+            if total > MAX_CARACTERES_LECTURA:
+                paginas.append(f"[…el documento tiene {len(lector.pages)} páginas…]")
+                break
+        return "\n\n".join(paginas)
+    except _ErrorDeDocumento:
+        raise
+    except Exception as e:
+        raise _ErrorDeDocumento(f"el PDF parece dañado ({type(e).__name__}).")
+
+
+def _texto_de_docx(archivo: Path) -> str:
+    try:
+        import docx
+    except ImportError:
+        raise _ErrorDeDocumento("falta la librería python-docx (pip install python-docx).")
+    try:
+        documento = docx.Document(str(archivo))
+    except Exception as e:
+        raise _ErrorDeDocumento(f"el documento parece dañado ({type(e).__name__}).")
+
+    partes = [p.text for p in documento.paragraphs if p.text.strip()]
+    # Las tablas no salen en los párrafos; sin esto se perdía su contenido.
+    for tabla in documento.tables:
+        for fila in tabla.rows:
+            celdas = [c.text.strip() for c in fila.cells if c.text.strip()]
+            if celdas:
+                partes.append(" | ".join(celdas))
+    return "\n".join(partes)
+
 
 @registro.registrar(
     nombre="leer_archivo",
-    descripcion="Lee el contenido de un archivo de texto y lo devuelve.",
+    descripcion=(
+        "Lee el contenido de un archivo y lo devuelve. Sirve para texto (.txt, "
+        ".md, .csv, .json...), PDF y documentos de Word (.docx). Úsala también "
+        "para resumir un documento: léelo y resume tú lo que devuelva."
+    ),
     accion="leer_archivo",
     parametros={
         "ruta": {
@@ -36,10 +133,33 @@ def leer_archivo(ruta: str) -> str:
     archivo = Path(ruta).expanduser().resolve()
     if not archivo.is_file():
         return f"No existe el archivo: {archivo}"
+
+    tipo = archivo.suffix.lower()
     try:
-        return archivo.read_text(encoding="utf-8")
+        if tipo == ".pdf":
+            texto = _texto_de_pdf(archivo)
+        elif tipo == ".docx":
+            texto = _texto_de_docx(archivo)
+        else:
+            texto = archivo.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return f"El archivo {archivo.name} no es texto legible."
+    except _ErrorDeDocumento as e:
+        return f"No he podido leer {archivo.name}: {e} NO te inventes su contenido."
+
+    if not texto.strip():
+        return (
+            f"{archivo.name} no tiene texto que se pueda extraer (puede ser un "
+            "escaneo o solo imágenes). NO te inventes su contenido."
+        )
+    if len(texto) > MAX_CARACTERES_LECTURA:
+        return (
+            texto[:MAX_CARACTERES_LECTURA]
+            + f"\n\n[Archivo recortado: solo se muestran los primeros "
+            f"{MAX_CARACTERES_LECTURA} de {len(texto)} caracteres. Díselo al "
+            "usuario si importa lo que falta.]"
+        )
+    return texto
 
 
 @registro.registrar(
@@ -94,16 +214,47 @@ def listar_carpeta(ruta: str) -> str:
     campo_objetivo="carpeta",
 )
 def buscar_archivos(carpeta: str, patron: str) -> str:
+    from security.guard import guardian
+
     base = Path(carpeta).expanduser().resolve()
     if not base.is_dir():
         return f"No existe la carpeta: {base}"
 
-    encontrados = list(base.rglob(patron))[:50]
+    patron = (patron or "").strip() or "*"
+    # El patrón es un nombre con comodines, no una ruta: con barras o '..' se
+    # podría apuntar fuera de la carpeta que el guardián validó.
+    if any(c in patron for c in ("/", "\\", ":")) or ".." in patron:
+        return "El patrón debe ser solo un nombre con comodines, como '*.pdf'."
+
+    # Cada subcarpeta se comprueba contra la política: la carpeta base puede
+    # estar permitida y contener otras prohibidas (Documents/Jarvis/data).
+    permitida = guardian.filtro_de_lectura()
+    limite = time.monotonic() + MAX_SEGUNDOS_BUSQUEDA
+    encontrados: list[Path] = []
+    incompleta = False
+
+    for raiz, carpetas, archivos in os.walk(base):
+        carpetas[:] = [
+            c for c in carpetas
+            if c.lower() not in _CARPETAS_QUE_NO_SE_RECORREN
+            and permitida((Path(raiz) / c).resolve())
+        ]
+        for nombre in carpetas + archivos:
+            if fnmatch.fnmatch(nombre.lower(), patron.lower()):
+                encontrados.append(Path(raiz) / nombre)
+        if len(encontrados) >= MAX_RESULTADOS_BUSQUEDA or time.monotonic() > limite:
+            incompleta = True
+            break
+
+    encontrados = encontrados[:MAX_RESULTADOS_BUSQUEDA]
     if not encontrados:
-        return f"No se encontró nada que coincida con '{patron}' en {base}."
-    return f"Encontrados {len(encontrados)}:\n" + "\n".join(
-        str(p) for p in encontrados
-    )
+        aviso = " (la búsqueda se cortó por tiempo)" if incompleta else ""
+        return f"No se encontró nada que coincida con '{patron}' en {base}{aviso}."
+
+    resultado = f"Encontrados {len(encontrados)}:\n" + "\n".join(str(p) for p in encontrados)
+    if incompleta:
+        resultado += "\n(Puede haber más: la búsqueda se detuvo antes de terminar.)"
+    return resultado
 
 
 @registro.registrar(
@@ -117,16 +268,19 @@ def buscar_archivos(carpeta: str, patron: str) -> str:
     campo_objetivo="ruta",
 )
 def escribir_archivo(ruta: str, contenido: str) -> str:
+    if len(contenido) > MAX_CARACTERES_ESCRITURA:
+        return (
+            f"El contenido tiene {len(contenido)} caracteres y el máximo es "
+            f"{MAX_CARACTERES_ESCRITURA}. NO digas que se guardó."
+        )
+
     archivo = Path(ruta).expanduser().resolve()
     archivo.parent.mkdir(parents=True, exist_ok=True)
 
     # Si ya existía, se guarda una copia antes de pisarlo. Sobrescribir sin
     # copia es la forma más fácil de perder trabajo sin darse cuenta.
     if archivo.exists():
-        marca = datetime.now().strftime("%Y%m%d-%H%M%S")
-        copia = PAPELERA / f"{archivo.stem}.{marca}{archivo.suffix}"
-        PAPELERA.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(archivo, copia)
+        shutil.copy2(archivo, _nombre_en_papelera(archivo))
 
     archivo.write_text(contenido, encoding="utf-8")
     return f"Guardado en {archivo} ({len(contenido)} caracteres)."
@@ -149,9 +303,7 @@ def borrar_archivo(ruta: str) -> str:
     if not archivo.is_file():
         return f"No existe el archivo: {archivo}"
 
-    PAPELERA.mkdir(parents=True, exist_ok=True)
-    marca = datetime.now().strftime("%Y%m%d-%H%M%S")
-    destino = PAPELERA / f"{archivo.stem}.{marca}{archivo.suffix}"
+    destino = _nombre_en_papelera(archivo)
     shutil.move(str(archivo), str(destino))
     return (
         f"'{archivo.name}' se movió a la papelera de Jarvis. "
@@ -208,15 +360,16 @@ def copiar_archivo(origen: str, destino: str) -> str:
     ruta_destino = Path(destino).expanduser().resolve()
     if ruta_destino.is_dir():
         ruta_destino = ruta_destino / ruta_origen.name
+        problema = _destino_final_permitido(ruta_destino)
+        if problema:
+            return f"No puedo dejar la copia ahí: {problema}"
 
     ruta_destino.parent.mkdir(parents=True, exist_ok=True)
 
     # Si el destino ya existe se guarda copia antes de pisarlo, igual que al
     # escribir: una copia nunca debería destruir algo sin dejar rastro.
     if ruta_destino.exists():
-        PAPELERA.mkdir(parents=True, exist_ok=True)
-        marca = datetime.now().strftime("%Y%m%d-%H%M%S")
-        shutil.copy2(ruta_destino, PAPELERA / f"{ruta_destino.stem}.{marca}{ruta_destino.suffix}")
+        shutil.copy2(ruta_destino, _nombre_en_papelera(ruta_destino))
 
     shutil.copy2(ruta_origen, ruta_destino)
     return f"Copiado a {ruta_destino}."
@@ -254,16 +407,14 @@ def mover_archivo(origen: str, destino: str) -> str:
     ruta_destino = Path(destino).expanduser().resolve()
     if ruta_destino.is_dir():
         ruta_destino = ruta_destino / ruta_origen.name
+        problema = _destino_final_permitido(ruta_destino)
+        if problema:
+            return f"No puedo dejarlo ahí: {problema}"
 
     ruta_destino.parent.mkdir(parents=True, exist_ok=True)
 
     if ruta_destino.exists():
-        PAPELERA.mkdir(parents=True, exist_ok=True)
-        marca = datetime.now().strftime("%Y%m%d-%H%M%S")
-        shutil.move(
-            str(ruta_destino),
-            str(PAPELERA / f"{ruta_destino.stem}.{marca}{ruta_destino.suffix}"),
-        )
+        shutil.move(str(ruta_destino), str(_nombre_en_papelera(ruta_destino)))
 
     shutil.move(str(ruta_origen), str(ruta_destino))
     return f"Movido a {ruta_destino}."
