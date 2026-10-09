@@ -71,9 +71,34 @@ CONTEXTO = int(os.getenv("JARVIS_CONTEXTO", "8192"))
 # la petición falla y se vuelve a comprobar en la siguiente.
 SEGUNDOS_DE_CONFIANZA = 30.0
 
-# El modelo de Claude para las consultas complejas. Sonnet 5 da la mejor
-# relación entre capacidad y coste para este uso puntual.
-MODELO_CLAUDE = os.getenv("JARVIS_MODELO_CLAUDE", "claude-sonnet-5")
+# El modelo de Claude por la API para las consultas complejas. Haiku es el más
+# barato, que es lo que pide un presupuesto cercano a cero.
+MODELO_CLAUDE = os.getenv("JARVIS_MODELO_CLAUDE", "claude-haiku-5-5")
+
+# Cuánto razona Claude antes de contestar: low, medium, high, xhigh o max.
+# "medium" equilibra calidad y coste para consultas puntuales. Vacío = el valor
+# por defecto del modelo.
+ESFUERZO_CLAUDE = os.getenv("JARVIS_ESFUERZO_CLAUDE", "medium").strip().lower()
+
+# Modelos que rechazan el parámetro de esfuerzo con un error 400. Mandárselo
+# haría fallar cada llamada y Jarvis volvería al modelo local sin avisar.
+_SIN_ESFUERZO = ("claude-haiku-4-5", "claude-sonnet-4-5", "claude-3")
+
+
+def admite_esfuerzo(modelo: str) -> bool:
+    return not modelo.startswith(_SIN_ESFUERZO)
+
+
+# Por dónde se llega a Claude:
+#   api          -> la API de Anthropic con ANTHROPIC_API_KEY (factura por uso).
+#   claude_code  -> el programa Claude Code instalado en este equipo, con tu
+#                   sesión de claude.ai: gasta el uso de tu suscripción, no
+#                   créditos de la API. Solo sirve en tu equipo.
+CLAUDE_VIA = os.getenv("JARVIS_CLAUDE_VIA", "api").strip().lower()
+
+# Modelo cuando se va por Claude Code. Un alias ("haiku", "sonnet", "opus")
+# apunta siempre al último de esa familia, sin tener que saber su identificador.
+MODELO_CLAUDE_CODE = os.getenv("JARVIS_MODELO_CLAUDE_CODE", "haiku")
 
 
 class Motor(str, Enum):
@@ -547,6 +572,8 @@ class ModeloClaude:
             ]
         if herramientas:
             parametros["tools"] = herramientas_para_claude(herramientas)
+        if ESFUERZO_CLAUDE and admite_esfuerzo(self.modelo):
+            parametros["output_config"] = {"effort": ESFUERZO_CLAUDE}
 
         try:
             if al_recibir_texto is None:
@@ -580,6 +607,174 @@ class ModeloClaude:
 
 
 # ---------------------------------------------------------------------------
+# Claude a través de Claude Code (tu suscripción)
+# ---------------------------------------------------------------------------
+
+_PROTOCOLO_DE_HERRAMIENTAS = """
+
+HERRAMIENTAS
+Para usar una herramienta responde ÚNICAMENTE con un objeto JSON en una línea,
+sin nada antes ni después:
+{{"name": "nombre_de_la_herramienta", "arguments": {{...}}}}
+Recibirás su resultado como "[resultado de ...]" y entonces contestas al
+usuario. Si no hace falta ninguna, contesta normalmente. Una por respuesta.
+
+Herramientas disponibles:
+{lista}"""
+
+
+def _texto_de_herramientas(herramientas: list[dict[str, Any]]) -> str:
+    lineas = []
+    for h in herramientas_para_claude(herramientas):
+        parametros = json.dumps(h["input_schema"].get("properties", {}), ensure_ascii=False)
+        lineas.append(f"- {h['name']}: {h['description']} Parámetros: {parametros}")
+    return "\n".join(lineas)
+
+
+def _transcripcion(mensajes: list[Mensaje]) -> str:
+    """La conversación como texto, que es lo que admite Claude Code en -p."""
+    partes = []
+    for m in mensajes:
+        if m.rol == "user":
+            partes.append(f"Usuario: {m.contenido}")
+        elif m.rol == "assistant" and m.llamadas:
+            for ll in m.llamadas:
+                partes.append("Jarvis: " + json.dumps(ll, ensure_ascii=False))
+        elif m.rol == "assistant" and m.contenido.strip():
+            partes.append(f"Jarvis: {m.contenido}")
+        elif m.rol == "tool":
+            partes.append(f"[resultado de {m.herramienta}]\n{m.contenido}")
+    partes.append("Responde ahora como Jarvis al último mensaje.")
+    return "\n\n".join(partes)
+
+
+def llamada_en_respuesta(texto: str, nombres: set[str]) -> dict[str, Any] | None:
+    """Si la respuesta entera es una petición de herramienta, la devuelve.
+
+    Solo si es TODO el texto: un JSON a mitad de una frase no se ejecuta. Y el
+    nombre tiene que ser una herramienta que existe.
+    """
+    limpio = texto.strip()
+    limpio = re.sub(r"^```(?:json)?\s*|\s*```$", "", limpio).strip()
+    if not (limpio.startswith("{") and limpio.endswith("}")):
+        return None
+    try:
+        datos = json.loads(limpio)
+    except json.JSONDecodeError:
+        return None
+    nombre = datos.get("name") if isinstance(datos, dict) else None
+    argumentos = datos.get("arguments", {}) if isinstance(datos, dict) else None
+    if nombre not in nombres or not isinstance(argumentos, dict):
+        return None
+    return {"name": nombre, "arguments": argumentos}
+
+
+class ModeloClaudeCode:
+    """Claude vía el programa Claude Code, con la sesión de claude.ai del usuario.
+
+    Se lanza en modo no interactivo SIN ninguna herramienta propia de Claude
+    Code: tiene las suyas para ejecutar comandos y editar archivos, y usarlas
+    se saltaría el guardián entero. Las herramientas de Jarvis se le describen
+    en el prompt; cuando pide una, la ejecuta el agente pasando por la política
+    como cualquier otra.
+    """
+
+    def __init__(self, modelo: str = MODELO_CLAUDE_CODE) -> None:
+        self.modelo = modelo
+
+    @staticmethod
+    def _ejecutable() -> str | None:
+        import shutil
+
+        encontrado = shutil.which("claude")
+        if encontrado:
+            return encontrado
+        candidato = Path.home() / ".local" / "bin" / "claude.exe"
+        return str(candidato) if candidato.is_file() else None
+
+    def disponible(self) -> bool:
+        return self._ejecutable() is not None
+
+    def responder(
+        self,
+        mensajes: list[Mensaje],
+        herramientas: list[dict[str, Any]] | None = None,
+        al_recibir_texto: Callable[[str], None] | None = None,
+    ) -> Respuesta:
+        import subprocess
+        import tempfile
+
+        ejecutable = self._ejecutable()
+        if ejecutable is None:
+            raise ErrorDeModelo("No encuentro Claude Code (el programa 'claude').")
+
+        sistema = "\n\n".join(m.contenido for m in mensajes if m.rol == "system")
+        if herramientas:
+            sistema += _PROTOCOLO_DE_HERRAMIENTAS.format(lista=_texto_de_herramientas(herramientas))
+
+        # Sin la clave de la API en el entorno: si estuviera, Claude Code la
+        # usaría y facturaría por uso en vez de gastar tu suscripción.
+        entorno = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+        }
+
+        # Una carpeta vacía como directorio de trabajo: así no carga memorias,
+        # CLAUDE.md ni ajustes de ningún proyecto.
+        with tempfile.TemporaryDirectory(prefix="jarvis-claude-") as carpeta:
+            archivo_sistema = Path(carpeta) / "sistema.txt"
+            archivo_sistema.write_text(sistema, encoding="utf-8")
+            orden = [
+                ejecutable, "-p",
+                "--model", self.modelo,
+                "--tools", "",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--no-session-persistence",
+                "--system-prompt-file", str(archivo_sistema),
+                "--output-format", "json",
+            ]
+            if ESFUERZO_CLAUDE:
+                orden += ["--effort", ESFUERZO_CLAUDE]
+            try:
+                proceso = subprocess.run(
+                    orden,
+                    input=_transcripcion([m for m in mensajes if m.rol != "system"]),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=carpeta,
+                    env=entorno,
+                    timeout=180,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.TimeoutExpired) as e:
+                raise ErrorDeModelo(f"Claude Code no respondió ({type(e).__name__}).") from e
+
+        try:
+            datos = json.loads(proceso.stdout)
+        except json.JSONDecodeError as e:
+            raise ErrorDeModelo(
+                f"Claude Code devolvió algo inesperado (código {proceso.returncode})."
+            ) from e
+        if proceso.returncode != 0 or datos.get("is_error"):
+            raise ErrorDeModelo(
+                f"Claude Code falló ({datos.get('subtype') or proceso.returncode})."
+            )
+
+        texto = str(datos.get("result") or "")
+        nombres = {h["name"] for h in herramientas_para_claude(herramientas or [])}
+        llamada = llamada_en_respuesta(texto, nombres)
+        if llamada is not None:
+            return Respuesta(texto="", motor=Motor.CLAUDE, modelo=self.modelo, herramientas=[llamada])
+
+        if al_recibir_texto is not None and texto:
+            al_recibir_texto(texto)
+        return Respuesta(texto=texto, motor=Motor.CLAUDE, modelo=self.modelo)
+
+
+# ---------------------------------------------------------------------------
 # Cerebro
 # ---------------------------------------------------------------------------
 
@@ -589,7 +784,7 @@ class Cerebro:
 
     def __init__(self, preferir_local: bool = True) -> None:
         self.local = ModeloLocal()
-        self.claude = ModeloClaude()
+        self.claude = ModeloClaudeCode() if CLAUDE_VIA == "claude_code" else ModeloClaude()
         self.preferir_local = preferir_local
 
     def estado(self) -> dict[str, Any]:

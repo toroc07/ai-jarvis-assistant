@@ -225,7 +225,7 @@ def poner_recordatorio(hora: str, mensaje: str) -> str:
     if isinstance(resultado, str):
         return resultado
     dia = "mañana " if vence.date() != ahora.date() else ""
-    return f"Recordatorio {resultado.numero} programado para {dia}{_cuando(vence)}.{_NOTA_VOLATIL}"
+    return f"Recordatorio {resultado.numero} programado: sonará {dia}{_cuando(vence)}.{_NOTA_VOLATIL}"
 
 
 @registro.registrar(

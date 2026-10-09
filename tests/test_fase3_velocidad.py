@@ -175,3 +175,12 @@ def test_un_resultado_nativo_llega_a_claude_como_texto() -> None:
         {"role": "user", "content": "¿qué hora es?"},
         {"role": "user", "content": "[resultado de hora_fecha]\nlas cinco"},
     ]
+
+
+def test_el_esfuerzo_no_se_manda_a_modelos_que_lo_rechazan() -> None:
+    from core.brain import admite_esfuerzo
+
+    assert admite_esfuerzo("claude-sonnet-5")
+    assert admite_esfuerzo("claude-opus-5")
+    assert not admite_esfuerzo("claude-haiku-4-5")
+    assert not admite_esfuerzo("claude-sonnet-4-5")

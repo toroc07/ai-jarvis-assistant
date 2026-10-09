@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 
@@ -67,9 +67,26 @@ def test_hay_un_maximo_de_avisos_pendientes(avisos, monkeypatch) -> None:
     assert "máximo" in temporizadores.poner_temporizador(10)
 
 
-def test_un_recordatorio_a_una_hora_pasada_es_para_manana(avisos) -> None:
-    hace_un_rato = (datetime.now() - timedelta(minutes=5)).strftime("%H:%M")
-    assert "mañana" in temporizadores.poner_recordatorio(hace_un_rato, "llamar")
+class _MediodiaFijo(datetime):
+    """Un reloj parado a las 12:00. Con la hora real, la prueba fallaba pasada
+    la medianoche: "hace cinco minutos" eran las 23:57, que hoy aún no han
+    llegado, así que el recordatorio era para hoy y no para mañana."""
+
+    @classmethod
+    def now(cls, tz=None):  # noqa: ARG003
+        return cls(2026, 10, 8, 12, 0)
+
+
+def test_un_recordatorio_a_una_hora_pasada_es_para_manana(avisos, monkeypatch) -> None:
+    monkeypatch.setattr(temporizadores, "datetime", _MediodiaFijo)
+    texto = temporizadores.poner_recordatorio("11:55", "llamar")
+    assert "mañana a las 11:55" in texto
+
+
+def test_un_recordatorio_a_una_hora_que_aun_no_llega_es_para_hoy(avisos, monkeypatch) -> None:
+    monkeypatch.setattr(temporizadores, "datetime", _MediodiaFijo)
+    texto = temporizadores.poner_recordatorio("12:30", "llamar")
+    assert "mañana" not in texto and "a las 12:30" in texto
 
 
 @pytest.mark.parametrize("hora", ["25:00", "18:61", "a las seis", ""])

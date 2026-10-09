@@ -311,10 +311,12 @@ de entorno `OLLAMA_IGPU_ENABLE=1`; sin ella todo corre en CPU. Para comprobarlo,
 
 **Deuda conocida**
 
-- El camino de Claude **nunca se ha ejecutado contra la API real**: sin clave no
-  se llega a llamar. La conversión de herramientas y mensajes al formato de
-  Claude sí está probada (antes se mandaban en formato Ollama y la API las
-  habría rechazado).
+- La vía de Claude por **API nunca se ha ejecutado contra la API real** (sin
+  clave no se llega a llamar); su conversión de herramientas y mensajes sí está
+  probada. La vía **Claude Code** sí está probada de verdad: con
+  `JARVIS_CLAUDE_VIA=claude_code` usa tu sesión de claude.ai (sin créditos de la
+  API), lanza Claude Code sin ninguna de sus herramientas y deja que las
+  acciones pasen por el guardián.
 - La interfaz no tiene pruebas propias más allá de comprobar que construye. Si
   alguien toca el orbe o los diálogos, nada le avisa de que lo rompió.
 
