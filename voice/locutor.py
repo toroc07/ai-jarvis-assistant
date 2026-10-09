@@ -22,13 +22,14 @@ aquí debilita esa capa.
 from __future__ import annotations
 
 import json
+import threading
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from voice.ruido import limpiar_ruido, nivel_de_ruido
+from voice.ruido import limpiar_ruido
 
 RAIZ = Path(__file__).resolve().parent.parent
 RUTA_PERFILES = RAIZ / "data" / "voz" / "perfiles.json"
@@ -140,6 +141,9 @@ class Locutor:
 
     def __init__(self) -> None:
         self._codificador = None
+        # Se precarga al arrancar y también se puede pedir al oír la palabra
+        # clave; sin esto, las dos cosas a la vez cargaban el modelo dos veces.
+        self._cargando = threading.Lock()
         self.perfiles: list[Perfil] = []
         self._cargar()
 
@@ -153,7 +157,12 @@ class Locutor:
         """
         if self._codificador is not None:
             return self._codificador
+        with self._cargando:
+            if self._codificador is None:
+                self._cargar_codificador()
+        return self._codificador
 
+    def _cargar_codificador(self) -> None:
         try:
             from speechbrain.inference.speaker import EncoderClassifier
             from speechbrain.utils.fetching import LocalStrategy
@@ -173,7 +182,6 @@ class Locutor:
             # privilegio requerido".
             local_strategy=LocalStrategy.COPY,
         )
-        return self._codificador
 
     # -- Huellas -------------------------------------------------------------
 

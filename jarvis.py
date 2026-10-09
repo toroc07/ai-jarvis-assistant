@@ -39,6 +39,13 @@ def _asegurar_salida() -> None:
 
     registro = RAIZ / "data" / "jarvis.log"
     registro.parent.mkdir(parents=True, exist_ok=True)
+    # Sin rotación el archivo crecía sin fin. Se rota al arrancar, que es el
+    # único momento en que nadie lo tiene abierto.
+    try:
+        if registro.stat().st_size > 5 * 1024 * 1024:
+            registro.replace(registro.with_name("jarvis.log.1"))
+    except OSError:
+        pass
     # line_buffering para que lo escrito aparezca aunque el proceso muera antes
     # de cerrar el archivo, que es justo cuando más falta hace leerlo.
     destino = open(registro, "a", encoding="utf-8", buffering=1, errors="replace")
@@ -50,6 +57,16 @@ def _asegurar_salida() -> None:
 
 
 _asegurar_salida()
+
+import logging  # noqa: E402
+
+# Los avisos de los módulos (fallos tragados, errores del registro de
+# auditoría) van a stderr: la consola si la hay, data/jarvis.log si no.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stderr,
+)
 
 from dotenv import load_dotenv  # noqa: E402
 
@@ -69,6 +86,7 @@ from ui.bandeja import Bandeja  # noqa: E402
 from ui.controlador_voz import ControladorVoz  # noqa: E402
 from ui.registro_voz import DialogoRegistroVoz  # noqa: E402
 from ui.ventana import Ventana  # noqa: E402
+from voice.escucha import nombre_de_la_palabra  # noqa: E402
 
 
 def main() -> int:
@@ -118,9 +136,7 @@ def main() -> int:
     latido.timeout.connect(lambda: None)
     app.latido = latido  # type: ignore[attr-defined]
     voz.escuchando.connect(
-        lambda: ventana.anotar_aviso(
-            f"Ya te escucho: di «{__import__('voice.escucha', fromlist=['x']).nombre_de_la_palabra()}»."
-        )
+        lambda: ventana.anotar_aviso(f"Ya te escucho: di «{nombre_de_la_palabra()}».")
     )
     voz.preparada.connect(
         lambda motor: ventana.anotar_aviso(f"Voz y transcripción listas ({motor}).")
@@ -144,6 +160,12 @@ def main() -> int:
         # Se guarda en la app para que el recolector de basura no se lleve el
         # icono y desaparezca de la barra de tareas.
         app.bandeja = bandeja  # type: ignore[attr-defined]
+
+        # Un recordatorio se ve además de oírse: si tienes el sonido quitado o
+        # no estás delante, la notificación queda en el centro de avisos.
+        voz.recordatorio.connect(
+            lambda texto: bandeja.showMessage(NOMBRE_ASISTENTE, texto)
+        )
 
         # Si aún no sabe tu voz, se ofrece configurarla: sin huella responde a
         # cualquiera, que es justo lo que no quieres.

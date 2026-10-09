@@ -12,7 +12,7 @@ respuesta, así que usa una conexión bloqueante, igual que en la ventana de cha
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 
 from core.agent import Agente
 from security.parada import interruptor
@@ -46,6 +46,9 @@ class ControladorVoz(QObject):
     preparada = Signal(str)
     # Apagar Jarvis del todo, a diferencia de cerrar el orbe.
     apagado_pedido = Signal(str)
+    # Ha vencido un temporizador o recordatorio. Se emite desde el hilo del
+    # temporizador; la señal lo lleva al de la interfaz.
+    recordatorio = Signal(str)
 
     def __init__(self, agente: Agente, ventana=None) -> None:
         super().__init__()
@@ -77,11 +80,36 @@ class ControladorVoz(QObject):
             self._al_pedir_permiso, Qt.BlockingQueuedConnection
         )
 
+        from skills import temporizadores
+
+        temporizadores.fijar_aviso(self.recordatorio.emit)
+        self.recordatorio.connect(self._al_sonar_recordatorio)
+
+    @Slot(str)
+    def _al_sonar_recordatorio(self, texto: str) -> None:
+        import threading
+
+        def decir() -> None:
+            try:
+                self.sesion.decir_aviso(texto)
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+
+        # Hablar bloquea; en el hilo de la interfaz congelaría la ventana.
+        threading.Thread(target=decir, daemon=True).start()
+
     # -- Permisos ------------------------------------------------------------
 
     def _pedir_permiso(self, peticion: Peticion) -> bool:
         """La llama el hilo de voz; se queda esperando la respuesta."""
-        self.permiso_pedido.emit(peticion)
+        # Una conexión bloqueante emitida desde el propio hilo de la interfaz
+        # se espera a sí misma para siempre. En ese caso se pregunta directo.
+        if QThread.currentThread() == self.thread():
+            self._al_pedir_permiso(peticion)
+        else:
+            self.permiso_pedido.emit(peticion)
         return self._permiso_concedido
 
     @Slot(object)
@@ -158,12 +186,17 @@ class ControladorVoz(QObject):
 
     def detener_conversacion(self) -> None:
         """Cierra el orbe y calla a Jarvis, pero sigue escuchando la palabra."""
-        self.sesion.voz.callar()
+        self.sesion.detener_conversacion()
         self.orbe.dormir()
 
     def parar(self) -> None:
         self.sesion.parar()
         self.orbe.dormir()
+        # Un QThread destruido mientras corre tumba el proceso al salir. Si
+        # aún está cargando modelos se le da un momento para terminar.
+        preparador = getattr(self, "_preparador", None)
+        if preparador is not None and preparador.isRunning():
+            preparador.wait(3000)
 
     @property
     def voz_configurada(self) -> bool:

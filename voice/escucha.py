@@ -74,11 +74,40 @@ UMBRAL_DETECCION = 0.55
 # usuario, que es justo lo que pasaba cuando aquí había un segundo fijo.
 SEGUNDOS_DE_CONTEXTO = SEGUNDOS_DE_VERIFICACION
 
-# Cuándo se considera que terminaste de hablar.
-SILENCIO_PARA_CORTAR = 1.2
+
+def _segundos_de_entorno(nombre: str, por_defecto: float) -> float:
+    try:
+        return float(os.getenv(nombre, por_defecto))
+    except ValueError:
+        return por_defecto
+
+
+# Cuándo se considera que terminaste de hablar. Es una espera fija que se suma
+# a cada respuesta, así que importa: con 1,2 s era el mayor retraso de todos.
+# 0,8 s deja pensar una pausa breve; si te corta a media frase, súbelo en .env.
+SILENCIO_PARA_CORTAR = _segundos_de_entorno("JARVIS_SILENCIO_FIN_DE_FRASE", 0.8)
 MAXIMO_DE_GRABACION = 15.0
 # Nivel por debajo del cual se considera silencio, en RMS de 0 a 1.
 UMBRAL_DE_SILENCIO = 0.012
+
+# Pausa entre intentos de reabrir el micrófono cuando falla.
+ESPERA_ENTRE_REINTENTOS = 5.0
+
+
+def _refrescar_dispositivos() -> None:
+    """Hace que sounddevice vuelva a buscar micrófonos.
+
+    PortAudio lee la lista de dispositivos una sola vez al iniciarse, así que
+    un micrófono conectado después no aparece hasta reiniciarlo.
+    """
+    try:
+        import sounddevice as sd
+
+        sd._terminate()
+        sd._initialize()
+    except Exception:
+        pass
+
 
 # Tope de bloques esperando a ser analizados. 25 bloques son dos segundos,
 # de sobra para absorber un tiron puntual de CPU sin acumular retraso.
@@ -121,6 +150,10 @@ class Oido:
         self._transcriptor = None
         self._escuchando = False
         self._hilo: threading.Thread | None = None
+        # Los modelos se cargan desde dos hilos (el que prepara al arrancar y el
+        # de la conversación si hablas antes de que termine). Sin el cerrojo,
+        # Whisper se cargaba dos veces: el doble de memoria y de espera.
+        self._cargando = threading.Lock()
 
         # La cola tiene tope A PROPÓSITO. Medido en este equipo: el micrófono
         # entrega un bloque cada 80 ms y analizarlo cuesta unos 100 ms, así que
@@ -142,7 +175,12 @@ class Oido:
     def _obtener_detector(self):
         if self._detector is not None:
             return self._detector
+        with self._cargando:
+            if self._detector is None:
+                self._cargar_detector()
+        return self._detector
 
+    def _cargar_detector(self) -> None:
         from openwakeword.model import Model
 
         RUTA_MODELOS.mkdir(parents=True, exist_ok=True)
@@ -160,28 +198,31 @@ class Oido:
                 )
             modelo = str(ruta_propia)
 
-        self._detector = Model(wakeword_models=[modelo], inference_framework="onnx")
+        detector = Model(wakeword_models=[modelo], inference_framework="onnx")
 
         # openWakeWord nombra la predicción por el nombre del archivo, que no
         # tiene por qué coincidir con lo que se configuró. Se guarda el nombre
         # real para leer la predicción correcta.
-        self._clave_prediccion = next(iter(self._detector.models), PALABRA)
-        return self._detector
+        self._clave_prediccion = next(iter(detector.models), PALABRA)
+        self._detector = detector
 
     def _obtener_transcriptor(self):
         if self._transcriptor is not None:
             return self._transcriptor
 
-        from faster_whisper import WhisperModel
+        with self._cargando:
+            if self._transcriptor is None:
+                from faster_whisper import WhisperModel
 
-        # int8 en CPU: es lo que hace que la transcripción tarde un segundo en
-        # lugar de cinco, a cambio de una pérdida de precisión inapreciable.
-        self._transcriptor = WhisperModel(
-            self.modelo_whisper,
-            device="cpu",
-            compute_type="int8",
-            download_root=str(RUTA_MODELOS / "whisper"),
-        )
+                # int8 en CPU: es lo que hace que la transcripción tarde un
+                # segundo en lugar de cinco, con una pérdida de precisión
+                # inapreciable.
+                self._transcriptor = WhisperModel(
+                    self.modelo_whisper,
+                    device="cpu",
+                    compute_type="int8",
+                    download_root=str(RUTA_MODELOS / "whisper"),
+                )
         return self._transcriptor
 
     def precargar(self) -> None:
@@ -195,11 +236,13 @@ class Oido:
         self,
         al_detectar: Callable[[Deteccion], None],
         al_recibir_audio: Callable[[np.ndarray], None] | None = None,
+        al_fallar: Callable[[str], None] | None = None,
     ) -> None:
         """Arranca la escucha en segundo plano.
 
         'al_detectar' se llama cada vez que suena la palabra clave.
         'al_recibir_audio' recibe cada bloque, para alimentar el orbe.
+        'al_fallar' recibe un aviso legible si el micrófono deja de funcionar.
         """
         if self._escuchando:
             return
@@ -207,7 +250,7 @@ class Oido:
         self._escuchando = True
         self._hilo = threading.Thread(
             target=self._bucle_protegido,
-            args=(al_detectar, al_recibir_audio),
+            args=(al_detectar, al_recibir_audio, al_fallar),
             daemon=True,
         )
         self._hilo.start()
@@ -216,25 +259,38 @@ class Oido:
         self,
         al_detectar: Callable[[Deteccion], None],
         al_recibir_audio: Callable[[np.ndarray], None] | None,
+        al_fallar: Callable[[str], None] | None = None,
     ) -> None:
-        """Envuelve el bucle para que un fallo no deje a Jarvis sordo en silencio.
+        """Mantiene la escucha viva aunque el micrófono falle.
 
-        Sin esto, cualquier excepción mata el hilo sin rastro: la aplicación
-        sigue abierta y aparentemente bien, pero ya no oye nada y no hay forma
-        de saber por qué.
+        Antes un error mataba el hilo para siempre: desenchufar los cascos un
+        momento dejaba a Jarvis sordo hasta reiniciarlo, sin avisar. Ahora se
+        avisa una vez y se reintenta cada pocos segundos, volviendo a buscar
+        dispositivos por si el micrófono cambió.
         """
         import traceback
 
-        try:
-            self._bucle(al_detectar, al_recibir_audio)
-        except Exception:
-            self._escuchando = False
-            traceback.print_exc()
-            print(
-                "[escucha] El hilo de escucha se detuvo por el error anterior. "
-                "Jarvis ya no responde a la palabra clave.",
-                flush=True,
-            )
+        avisado = False
+        while self._escuchando:
+            try:
+                self._bucle(al_detectar, al_recibir_audio)
+                return
+            except Exception as e:
+                traceback.print_exc()
+                if not avisado:
+                    avisado = True
+                    texto = (
+                        f"El micrófono ha dejado de funcionar ({e}). Lo seguiré "
+                        "intentando cada pocos segundos."
+                    )
+                    print(f"[escucha] {texto}", flush=True)
+                    if al_fallar is not None:
+                        try:
+                            al_fallar(texto)
+                        except Exception:
+                            pass
+                time.sleep(ESPERA_ENTRE_REINTENTOS)
+                _refrescar_dispositivos()
 
     def parar(self) -> None:
         self._escuchando = False
@@ -327,12 +383,15 @@ class Oido:
     # -- Grabación de una petición -------------------------------------------
 
     def grabar_peticion(
-        self, al_recibir_audio: Callable[[np.ndarray], None] | None = None
+        self,
+        al_recibir_audio: Callable[[np.ndarray], None] | None = None,
+        cancelar: threading.Event | None = None,
     ) -> np.ndarray:
         """Graba hasta que dejes de hablar y devuelve el audio.
 
-        Corta tras 1,2 segundos de silencio, que es la pausa natural al
-        terminar una frase sin cortar a quien piensa a media petición.
+        Corta tras SILENCIO_PARA_CORTAR segundos de silencio, la pausa natural
+        al terminar una frase sin cortar a quien piensa a media petición. Si se
+        activa 'cancelar' (cerraste el orbe), para en el acto y no devuelve nada.
         """
         import sounddevice as sd
 
@@ -356,6 +415,8 @@ class Oido:
             callback=entrada,
         ):
             while transcurrido < MAXIMO_DE_GRABACION:
+                if cancelar is not None and cancelar.is_set():
+                    return np.array([], dtype=np.float32)
                 try:
                     bloque = cola.get(timeout=1.0)
                 except queue.Empty:

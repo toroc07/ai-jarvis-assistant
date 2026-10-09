@@ -128,6 +128,29 @@ class DialogoRegistroVoz(QDialog):
         self.registrador.terminado.connect(self.al_terminar)
         self.registrador.start()
 
+    def _grabando(self) -> bool:
+        return self.registrador is not None and self.registrador.isRunning()
+
+    def reject(self) -> None:
+        # Cerrar el diálogo destruía el hilo que aún estaba grabando, y Qt
+        # tumba el proceso entero cuando eso pasa. Mientras graba no se cierra:
+        # la grabación termina sola en cuanto acabas la frase.
+        if self._grabando():
+            self.explicacion.setText(
+                "Espera a que termine la grabación: se corta sola cuando "
+                "dejas de hablar."
+            )
+            self.explicacion.setStyleSheet("color: #e8a33d;")
+            return
+        super().reject()
+
+    def closeEvent(self, evento) -> None:  # noqa: N802 (nombre de Qt)
+        if self._grabando():
+            evento.ignore()
+            self.reject()
+            return
+        super().closeEvent(evento)
+
     @Slot(str, int, int)
     def mostrar_frase(self, frase: str, indice: int, total: int) -> None:
         self.progreso.setRange(0, total)

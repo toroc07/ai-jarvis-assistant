@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from voice.texto import limpiar_para_hablar  # noqa: E402
+from core.texto import limpiar_para_hablar  # noqa: E402
 
 
 class TestEmojis:

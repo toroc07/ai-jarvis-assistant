@@ -24,9 +24,11 @@ que esta clase no sabe nada de Qt y se puede probar sin abrir ventanas.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
@@ -41,6 +43,7 @@ from skills.conversacion import (
     es_despedida,
 )
 from voice.escucha import Deteccion, Oido
+from voice.frases import HabladorPorFrases
 from voice.habla import Voz
 from voice.locutor import REBAJA_EN_LA_PALABRA_CLAVE, Locutor
 
@@ -48,6 +51,11 @@ from voice.locutor import REBAJA_EN_LA_PALABRA_CLAVE, Locutor
 # segundos dan para pensar la siguiente frase sin dejar el micrófono abierto
 # indefinidamente.
 ESPERA_DE_CONTINUACION = 10.0
+
+# Decir la palabra clave mientras Jarvis habla lo interrumpe. Solo funciona con
+# alguna voz registrada: sin verificar quién la dice, Jarvis podría cortarse a
+# sí mismo al oírse decir su nombre por los altavoces.
+PERMITIR_INTERRUPCION = os.getenv("JARVIS_INTERRUMPIR", "1") != "0"
 
 
 class Fase(str, Enum):
@@ -91,8 +99,20 @@ class SesionDeVoz:
         self._fase = Fase.DORMIDO
         self._activa = False
         self._en_conversacion = threading.Event()
+        # Se activa al cerrar el orbe. Antes cerrarlo solo callaba la voz: el
+        # hilo de la conversación seguía grabando, el orbe reaparecía en la
+        # siguiente fase y la palabra clave se ignoraba hasta que acabara.
+        self._cancelada = threading.Event()
+        # Le has cortado diciendo la palabra clave: se calla y te escucha, pero
+        # la conversación sigue (a diferencia de cerrar el orbe).
+        self._interrumpida = threading.Event()
         # Quién abrió la conversación en curso, para dirigirse a esa persona.
         self._quien_habla = ""
+        # La verificación de la voz corre aquí mientras Whisper transcribe:
+        # antes iban una detrás de otra y se sumaban sus tiempos.
+        self._verificador = ThreadPoolExecutor(max_workers=1, thread_name_prefix="verificacion")
+        # Momento en que dejaste de hablar, para medir cuánto tarda en contestar.
+        self._fin_de_frase: float | None = None
 
     # -- Estado --------------------------------------------------------------
 
@@ -101,6 +121,10 @@ class SesionDeVoz:
         return self._fase
 
     def _cambiar_fase(self, fase: Fase) -> None:
+        # Con la conversación cancelada solo se acepta volver a dormir: si no,
+        # el orbe que acabas de cerrar volvería a abrirse solo.
+        if self._cancelada.is_set() and fase is not Fase.DORMIDO:
+            return
         self._fase = fase
         if self.avisos.cambio_de_fase:
             self.avisos.cambio_de_fase(fase)
@@ -130,9 +154,27 @@ class SesionDeVoz:
         self.arrancar()
 
     def preparar_el_resto(self) -> str:
-        """Carga la voz y la transcripción, ya con la escucha en marcha."""
+        """Carga la voz, la transcripción y el verificador con la escucha en marcha.
+
+        Todo lo que se cargue aquí no se paga en la primera pregunta. El
+        verificador de voz tardaba varios segundos y se cargaba al decir la
+        palabra clave por primera vez, con el micrófono desatendido mientras.
+        """
         motor = self.voz.preparar()
+        try:
+            self.voz.calentar()
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
         self.oido._obtener_transcriptor()
+        if self.locutor.configurado:
+            try:
+                self.locutor._obtener_codificador()
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
         return motor
 
     def preparar(self) -> str:
@@ -147,12 +189,19 @@ class SesionDeVoz:
             return
         self._activa = True
         self._cambiar_fase(Fase.DORMIDO)
-        self.oido.escuchar(al_detectar=self._al_detectar_palabra)
+        self.oido.escuchar(al_detectar=self._al_detectar_palabra, al_fallar=self._avisar)
 
     def parar(self) -> None:
         self._activa = False
+        self._cancelada.set()
         self.voz.callar()
         self.oido.parar()
+        self._cambiar_fase(Fase.DORMIDO)
+
+    def detener_conversacion(self) -> None:
+        """Corta la conversación en curso, pero sigue esperando la palabra clave."""
+        self._cancelada.set()
+        self.voz.callar()
         self._cambiar_fase(Fase.DORMIDO)
 
     # -- Detección -----------------------------------------------------------
@@ -162,6 +211,18 @@ class SesionDeVoz:
         # Si ya hay una conversación en marcha, la activación se ignora: no
         # tiene sentido abrir otra encima.
         if self._en_conversacion.is_set():
+            if self._puede_interrumpirse():
+                resultado = self.locutor.identificar(
+                    deteccion.audio_previo, es_palabra_clave=True
+                )
+                if resultado.es_el_usuario:
+                    print(
+                        f"[voz] Interrumpido por {resultado.nombre or 'el usuario'} "
+                        f"(parecido {resultado.parecido:.3f})",
+                        flush=True,
+                    )
+                    self.interrumpir()
+                    return
             # Se registra: si una conversación anterior se quedara colgada sin
             # cerrarse, esta línea repitiéndose sería la única pista de por qué
             # Jarvis deja de responder a la palabra clave.
@@ -200,6 +261,18 @@ class SesionDeVoz:
         )
         self._iniciar_conversacion()
 
+    def _puede_interrumpirse(self) -> bool:
+        return (
+            PERMITIR_INTERRUPCION
+            and self._fase is Fase.HABLANDO
+            and self.locutor.configurado
+        )
+
+    def interrumpir(self) -> None:
+        """Le corta mientras habla y pasa a escucharte, sin cerrar el orbe."""
+        self._interrumpida.set()
+        self.voz.callar()
+
     def abrir_conversacion(self, quien: str = "") -> bool:
         """Abre el orbe y empieza a escuchar sin esperar a la palabra clave.
 
@@ -219,6 +292,7 @@ class SesionDeVoz:
         return True
 
     def _iniciar_conversacion(self) -> None:
+        self._cancelada.clear()
         self._en_conversacion.set()
         threading.Thread(target=self._conversar, daemon=True).start()
 
@@ -227,10 +301,10 @@ class SesionDeVoz:
     def _conversar(self) -> None:
         """Lleva una conversación completa hasta que te despides o callas."""
         try:
-            while self._activa:
+            while self._activa and not self._cancelada.is_set():
                 peticion = self._escuchar_peticion()
 
-                if peticion is None:
+                if peticion is None or self._cancelada.is_set():
                     # Silencio: se entiende que ya no hay nada más.
                     break
 
@@ -260,24 +334,42 @@ class SesionDeVoz:
             self._avisar(f"Error en la conversación: {e}")
             self._decir_el_problema(e)
         finally:
+            # El altavoz se deja abierto entre frases de una misma conversación;
+            # al terminarla se libera.
+            try:
+                self.voz.cerrar_audio()
+            except Exception:
+                pass
             self._en_conversacion.clear()
             self._cambiar_fase(Fase.DORMIDO)
 
     def _escuchar_peticion(self) -> str | None:
         """Graba y transcribe. Devuelve None si no dijiste nada."""
         self._cambiar_fase(Fase.ESCUCHANDO)
-        audio = self.oido.grabar_peticion(al_recibir_audio=self._emitir_espectro)
+        audio = self.oido.grabar_peticion(
+            al_recibir_audio=self._emitir_espectro, cancelar=self._cancelada
+        )
 
         if audio.size == 0:
             return None
 
+        self._fin_de_frase = time.perf_counter()
         self._cambiar_fase(Fase.PENSANDO)
 
         # Verificación seria, con la petición completa: dura varios segundos y
         # ahí sí se distinguen las voces. La de la palabra clave solo decidía
-        # si abrir el orbe.
-        if self.locutor.configurado:
-            comprobacion = self.locutor.identificar(audio)
+        # si abrir el orbe. Corre a la vez que la transcripción; si resulta no
+        # ser tu voz, lo transcrito se tira sin usarlo.
+        verificacion = (
+            self._verificador.submit(self.locutor.identificar, audio)
+            if self.locutor.configurado
+            else None
+        )
+
+        texto = self.oido.transcribir(audio)
+
+        if verificacion is not None:
+            comprobacion = verificacion.result()
             if comprobacion.es_conocido and comprobacion.nombre:
                 # La petición completa identifica mejor que el "hey ...", así
                 # que si aquí se reconoce a otra persona, manda esta.
@@ -291,8 +383,6 @@ class SesionDeVoz:
                 )
                 return None
 
-        texto = self.oido.transcribir(audio)
-
         if not texto:
             return None
 
@@ -303,12 +393,28 @@ class SesionDeVoz:
     def _responder(self, peticion: str) -> bool:
         """Contesta. Devuelve False si hay que cerrar la conversación."""
         self._cambiar_fase(Fase.PENSANDO)
+        self._interrumpida.clear()
 
-        resultado = self.agente.responder(
-            peticion,
-            pedir_confirmacion=self.avisos.pedir_permiso,
-            quien_habla=self._quien_habla,
+        # La respuesta se va diciendo según llega, frase a frase, en lugar de
+        # esperar a tenerla entera. Ver voice/frases.py para los frenos.
+        hablador = HabladorPorFrases(
+            decir=lambda frase: self.voz.decir(frase, al_generar_audio=self._emitir_espectro),
+            al_empezar=self._al_empezar_a_hablar,
+            cancelado=lambda: self._cancelada.is_set() or self._interrumpida.is_set(),
         )
+
+        try:
+            resultado = self.agente.responder(
+                peticion,
+                pedir_confirmacion=self.avisos.pedir_permiso,
+                quien_habla=self._quien_habla,
+                al_recibir_texto=hablador.recibir,
+                al_usar_herramienta=hablador.nueva_vuelta,
+            )
+        except Exception:
+            # Lo que ya estuviera sonando termina antes de explicar el error.
+            hablador.esperar()
+            raise
         texto = resultado.texto
 
         # El modelo puede cerrar la conversación o apagar Jarvis llamando a
@@ -321,7 +427,21 @@ class SesionDeVoz:
         if self.avisos.texto_de_jarvis:
             self.avisos.texto_de_jarvis(texto)
 
-        self._hablar(texto)
+        # Cerraste el orbe mientras pensaba: la respuesta queda escrita en la
+        # ventana de chat, pero no se lee en voz alta.
+        if self._cancelada.is_set():
+            hablador.esperar()
+            return False
+
+        hablador.terminar(texto)
+        self.voz.terminar_de_sonar()
+
+        # Si le cortaste, lo que quedaba por decir se queda en la ventana de
+        # chat y la conversación sigue: lo siguiente es escucharte.
+        # Un apagado que pediste se respeta aunque le cortes a media despedida.
+        if self._interrumpida.is_set() and not apagar:
+            self._interrumpida.clear()
+            return True
 
         if apagar:
             self._apagarse("Lo pidió el modelo tras tu petición.")
@@ -329,11 +449,31 @@ class SesionDeVoz:
 
         return not cerrar
 
+    def _al_empezar_a_hablar(self) -> None:
+        self._cambiar_fase(Fase.HABLANDO)
+        if self._fin_de_frase is not None:
+            espera = time.perf_counter() - self._fin_de_frase
+            print(f"[voz] Empezó a contestar {espera:.2f} s después de que callaras.", flush=True)
+            self._fin_de_frase = None
+
     def _hablar(self, texto: str) -> None:
         if not texto:
             return
-        self._cambiar_fase(Fase.HABLANDO)
+        self._al_empezar_a_hablar()
         self.voz.decir(texto, al_generar_audio=self._emitir_espectro)
+        self.voz.terminar_de_sonar()
+
+    def decir_aviso(self, texto: str) -> None:
+        """Dice un aviso que no es respuesta a nada, como un recordatorio.
+
+        Bloquea mientras habla, así que se llama desde un hilo propio.
+        """
+        if self.avisos.texto_de_jarvis:
+            self.avisos.texto_de_jarvis(texto)
+        self.voz.decir(texto, al_generar_audio=self._emitir_espectro)
+        self.voz.terminar_de_sonar()
+        if not self._en_conversacion.is_set():
+            self.voz.cerrar_audio()
 
     def _decir_el_problema(self, error: Exception) -> None:
         """Explica en voz alta por qué no ha podido, con lenguaje llano."""
@@ -353,7 +493,9 @@ class SesionDeVoz:
             self._hablar(aviso)
         except Exception:
             # Si ni siquiera puede hablar, al menos queda en el registro.
-            pass
+            import traceback
+
+            traceback.print_exc()
 
     def _apagarse(self, motivo: str) -> None:
         """Dice adiós y cierra Jarvis del todo.
