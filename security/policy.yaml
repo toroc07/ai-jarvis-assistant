@@ -69,8 +69,35 @@ archivos:
     - ".jpg"
     - ".jpeg"
 
+  # Tipos que puede leer pero NO crear ni modificar. Un script dejado en el
+  # Escritorio es código que luego alguien puede ejecutar sin darse cuenta.
+  extensiones_solo_lectura:
+    - ".py"
+
   # Tamaño máximo que puede leer de una vez, en megabytes.
   max_mb_lectura: 25
+
+# ---------------------------------------------------------------------------
+# DIRECCIONES WEB
+# ---------------------------------------------------------------------------
+# abrir_url es 'permitir' solo para estos dominios (y sus subdominios). Para
+# cualquier otro te pregunta antes de abrirlo: una dirección puede llevar datos
+# dentro, y así nada se envía fuera sin que lo veas. Añade aquí tus sitios.
+urls:
+  dominios_confiables:
+    - "youtube.com"
+    - "youtu.be"
+    - "google.com"
+    - "wikipedia.org"
+    - "github.com"
+    - "spotify.com"
+    - "netflix.com"
+    - "twitch.tv"
+    - "amazon.es"
+    - "amazon.com"
+    - "outlook.com"
+    - "microsoft.com"
+    - "whatsapp.com"
 
 # ---------------------------------------------------------------------------
 # ACCIONES
@@ -95,15 +122,18 @@ acciones:
   consultar_datos:       permitir   # Solo lee su propia memoria.
   recordar_dato:         permitir   # Escribe en su propia memoria, no en tu disco.
   olvidar_dato:          permitir   # Borra de su propia memoria.
+  temporizador:          permitir   # Avisos en la memoria del proceso; no toca el disco.
+  leer_notas:            permitir   # Lee su propio cuaderno de notas (workspace/notas.md).
 
   # --- Multimedia (reversibles, sin riesgo) ---
   control_volumen:     permitir
   control_musica:      permitir
   abrir_app:           permitir
-  abrir_url:           permitir   # Solo http y https; el resto se rechaza en la habilidad.
+  abrir_url:           permitir   # Solo http/https; fuera de 'urls' pregunta antes (lo decide el guardián).
 
   # --- Modificación (reversibles pero con consecuencias) ---
   escribir_archivo:    confirmar
+  tomar_nota:          confirmar   # Solo añade al final de workspace/notas.md, nunca sobrescribe.
   copiar_archivo:      confirmar
   crear_carpeta:       confirmar
 

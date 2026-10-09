@@ -42,6 +42,8 @@ NOMBRES = {
     "mover_archivo": "Mover un archivo",
     "copiar_archivo": "Copiar un archivo",
     "crear_carpeta": "Crear una carpeta",
+    "tomar_nota": "Apuntar una nota",
+    "abrir_url": "Abrir una página que no está en tu lista de confianza",
     "ejecutar_comando": "Ejecutar un comando",
     "domotica": "Controlar un dispositivo de casa",
 }
@@ -67,6 +69,15 @@ class DialogoConfirmacion(QDialog):
         titulo.setStyleSheet("font-size: 15px; font-weight: 600;")
         disposicion.addWidget(titulo)
 
+        # Al mover o copiar, el objetivo es solo el destino. Sin el origen no se
+        # sabe QUÉ archivo va a desaparecer de su sitio, que es justo lo que
+        # hay que ver antes de aceptar.
+        origen = (peticion.detalles or {}).get("origen")
+        if origen:
+            disposicion.addWidget(QLabel("Desde:"))
+            disposicion.addWidget(self._recuadro(str(origen)))
+            if peticion.objetivo:
+                disposicion.addWidget(QLabel("Hasta:"))
         if peticion.objetivo:
             disposicion.addWidget(self._recuadro(peticion.objetivo))
 
