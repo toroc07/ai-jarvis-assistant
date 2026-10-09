@@ -72,6 +72,7 @@ quita.
 |---|---|
 | Hablarle | decir **«hey Jarvis»** |
 | Hablarle sin decirlo | «Hablar con Jarvis» en la bandeja |
+| Cortarle mientras habla | decir **«hey Jarvis»** (necesita tu voz registrada) |
 | Terminar la conversación | despedirte, o clic derecho en el orbe |
 | Apagarlo del todo | decir «Jarvis, apágate», Ctrl+C, o la bandeja |
 | **Parada de emergencia** | **Ctrl+Alt+J** |
@@ -81,6 +82,20 @@ quita.
 **Cerrar no es apagar.** Cerrar la ventana o despedirte deja a Jarvis
 escuchando en segundo plano, con la conversación viva. Apagarlo termina el
 proceso, y al volver a ejecutarlo empieza una sesión nueva.
+
+Además de abrir apps, webs y música, consultar el tiempo (hoy o los próximos
+días) y gestionar archivos dentro de las carpetas permitidas, sabe:
+
+- **Temporizadores y recordatorios**: «avísame en diez minutos», «recuérdame a
+  las seis que llame a mamá». Suenan por voz y en la bandeja. Viven en memoria:
+  si apagas Jarvis del todo, se pierden.
+- **Notas rápidas**: «apunta que tengo que comprar pilas» las añade a
+  `workspace/notas.md` (pide confirmación); «¿qué tengo apuntado?» las lee.
+- **Leer PDF y Word**, además de texto. Para resumir, pídeselo sobre el archivo.
+- **Estado del equipo**: batería, conexión, uso de CPU y memoria, disco.
+
+La voz de Piper se puede cambiar: `python -m voice.habla descargar
+es_ES-sharvard-medium` y luego `JARVIS_VOZ_PIPER=es_ES-sharvard-medium` en `.env`.
 
 ---
 
@@ -270,6 +285,14 @@ Medido en el equipo de referencia, con qwen3:8b sobre gráfica integrada:
 Una petición con herramienta cuesta el doble porque necesita dos vueltas al
 modelo: una para decidir qué usar y otra para redactar con el resultado.
 
+En las respuestas largas Jarvis empieza a hablar con la primera frase, sin
+esperar al resto (medido: primera frase a los 4,6 s de una respuesta de 12 s).
+Lo que podría ser una afirmación falsa o una marca interna no se adelanta.
+
+Todas las peticiones a Ollama van en streaming aunque nadie lea los trozos:
+Ollama no reaprovecha el prompt procesado entre peticiones con y sin streaming,
+y cada vez que no lo reaprovecha cuesta ~25 s volver a procesarlo en esta iGPU.
+
 Ollama descarta las gráficas integradas por defecto. Se activan con la variable
 de entorno `OLLAMA_IGPU_ENABLE=1`; sin ella todo corre en CPU. Para comprobarlo,
 `ollama ps` debe decir `100% GPU`.
@@ -280,17 +303,18 @@ de entorno `OLLAMA_IGPU_ENABLE=1`; sin ella todo corre en CPU. Para comprobarlo,
 
 **Funciones**
 
-- Alarmas y temporizadores
+- Temporizadores que sobrevivan a apagar Jarvis
 - Búsqueda web general (hoy solo busca en YouTube)
-- Leer tus documentos y PDFs con búsqueda semántica
+- Búsqueda semántica en tus documentos (hoy los lee de uno en uno)
 - Calendario, correo y mensajería
 - Domótica
 
 **Deuda conocida**
 
-- El camino de Claude está escrito y enrutado, pero **nunca se ha ejecutado**:
-  sin clave de API no se llega a llamar. El enrutado sí está probado; la llamada
-  en sí, no.
+- El camino de Claude **nunca se ha ejecutado contra la API real**: sin clave no
+  se llega a llamar. La conversión de herramientas y mensajes al formato de
+  Claude sí está probada (antes se mandaban en formato Ollama y la API las
+  habría rechazado).
 - La interfaz no tiene pruebas propias más allá de comprobar que construye. Si
   alguien toca el orbe o los diálogos, nada le avisa de que lo rompió.
 
@@ -314,10 +338,12 @@ pedido, que es una forma bastante honesta de decidir qué construir primero.
 ## Pruebas
 
 ```powershell
+.\venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\venv\Scripts\python.exe -m ruff check .
 .\venv\Scripts\python.exe -m pytest tests\ -q
 ```
 
-286 pruebas, y la integración continua las ejecuta en cada cambio. Las del
+Más de 350 pruebas, y la integración continua las ejecuta en cada cambio. Las del
 guardián cubren los intentos de fuga que importan: salir de
 las carpetas permitidas con `..`, encadenar comandos detrás de uno legítimo,
 llegar a las credenciales, y que Jarvis reescriba su propia política.

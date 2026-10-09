@@ -1,0 +1,9 @@
+# Solo errores reales: sintaxis, nombres sin definir, imports que sobran o
+# faltan. El estilo no se vigila aquí; el objetivo es que el CI pare lo que
+# rompería Jarvis, no discutir comillas.
+extend-exclude = ["venv"]
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+# Nombres de una letra como 'l' en las pruebas: legibles en su contexto.
+ignore = ["E741"]

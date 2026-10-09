@@ -1,0 +1,4 @@
+# Herramientas para desarrollar y probar Jarvis. No hacen falta para usarlo.
+#   pip install -r requirements.txt -r requirements-dev.txt
+pytest>=8.0,<10
+ruff>=0.6,<1

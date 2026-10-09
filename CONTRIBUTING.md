@@ -8,8 +8,9 @@ son pocas pero firmes.
 ```powershell
 py -3.12 -m venv venv
 .\venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt
 pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m ruff check .
 python -m pytest tests\ -q
 ```
 

@@ -28,9 +28,14 @@ jobs:
         # Solo las que hacen falta para las pruebas. Las de voz (torch,
         # speechbrain, faster-whisper) pesan cientos de megas y descargan
         # modelos, así que las pruebas que las necesitan se saltan solas.
+        # '-c requirements.txt' aplica los mismos topes de versión que en tu
+        # equipo, para que el CI pruebe lo que de verdad se instala.
         run: |
           python -m pip install --upgrade pip
-          pip install pytest PyYAML httpx numpy python-dotenv psutil PySide6
+          pip install -r requirements-dev.txt -c requirements.txt PyYAML httpx numpy python-dotenv psutil PySide6 anthropic pypdf python-docx
+
+      - name: Buscar errores en el código
+        run: python -m ruff check .
 
       - name: Ejecutar las pruebas
         # Sin pantalla en el runner: Qt necesita saberlo para no fallar al
