@@ -88,15 +88,24 @@ class Memoria:
         self.ruta = ruta
         self.ruta.parent.mkdir(parents=True, exist_ok=True)
         with self._conexion() as con:
+            # WAL deja leer mientras otro hilo escribe (la voz guarda un turno
+            # mientras la interfaz consulta el historial). Se guarda en el
+            # propio archivo, así que basta con fijarlo una vez.
+            con.execute("PRAGMA journal_mode=WAL")
             con.executescript(ESQUEMA)
 
     @contextmanager
     def _conexion(self) -> Iterator[sqlite3.Connection]:
-        con = sqlite3.connect(self.ruta)
+        # Con timeout, un hilo espera a que otro termine de escribir en vez de
+        # fallar al instante con "database is locked".
+        con = sqlite3.connect(self.ruta, timeout=10)
         con.row_factory = sqlite3.Row
         try:
             yield con
             con.commit()
+        except Exception:
+            con.rollback()
+            raise
         finally:
             con.close()
 
@@ -127,11 +136,14 @@ class Memoria:
         return [Turno(**dict(f)) for f in reversed(filas)]
 
     def buscar_en_conversaciones(self, texto: str, limite: int = 10) -> list[Turno]:
+        # '%' y '_' son comodines en LIKE: sin escaparlos, buscar "100%" o
+        # "mi_archivo" encontraría cosas que no contienen ese texto.
+        escapado = texto.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         with self._conexion() as con:
             filas = con.execute(
                 "SELECT rol, contenido, momento, motor FROM conversaciones "
-                "WHERE contenido LIKE ? ORDER BY id DESC LIMIT ?",
-                (f"%{texto}%", limite),
+                "WHERE contenido LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?",
+                (f"%{escapado}%", limite),
             ).fetchall()
         return [Turno(**dict(f)) for f in filas]
 
