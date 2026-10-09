@@ -24,7 +24,33 @@ import httpx
 # Configuración
 # ---------------------------------------------------------------------------
 
-OLLAMA_URL = os.getenv("JARVIS_OLLAMA_URL", "http://localhost:11434")
+_URL_OLLAMA_POR_DEFECTO = "http://localhost:11434"
+_HOSTS_LOCALES = {"localhost", "127.0.0.1", "::1"}
+
+
+def url_de_ollama_segura(url: str, permitir_remoto: bool = False) -> str:
+    """Devuelve la URL de Ollama, o la local si la configurada no es de este equipo.
+
+    Todo lo que dices y todo lo que lee Jarvis viaja a esa dirección, sin cifrar
+    y sin autenticación. Si una variable de entorno cambiada la apuntara a otra
+    máquina, tu conversación saldría del PC sin avisar. Un Ollama en otro equipo
+    de tu red es legítimo, pero hay que pedirlo (JARVIS_PERMITIR_OLLAMA_REMOTO=1).
+    """
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    if host in _HOSTS_LOCALES or permitir_remoto:
+        return url
+    return _URL_OLLAMA_POR_DEFECTO
+
+
+OLLAMA_URL = url_de_ollama_segura(
+    os.getenv("JARVIS_OLLAMA_URL", _URL_OLLAMA_POR_DEFECTO),
+    permitir_remoto=os.getenv("JARVIS_PERMITIR_OLLAMA_REMOTO") == "1",
+)
 MODELO_LOCAL = os.getenv("JARVIS_MODELO_LOCAL", "qwen3:8b")
 
 # Cuánto tiempo mantiene Ollama el modelo cargado en memoria sin usarlo. El
@@ -33,6 +59,17 @@ MODELO_LOCAL = os.getenv("JARVIS_MODELO_LOCAL", "qwen3:8b")
 # hora cubre el uso normal a cambio de unos 6 GB de RAM ocupados, que sobran
 # en un equipo de 32 GB.
 KEEP_ALIVE = os.getenv("JARVIS_KEEP_ALIVE", "30m")
+
+# Tamaño del contexto que se pide a Ollama, en tokens. Su valor de fábrica es
+# 4096, y el prompt de Jarvis (instrucciones + 31 herramientas) ocupa unos
+# 4600: Ollama recortaba el PRINCIPIO sin avisar, así que el modelo perdía parte
+# de sus instrucciones y las primeras herramientas de la lista. Medido: con 4096
+# no usaba la del tiempo; con 8192 sí. Cuesta unos 0,6 GB más de memoria.
+CONTEXTO = int(os.getenv("JARVIS_CONTEXTO", "8192"))
+
+# Cuánto se fía de que Ollama sigue en marcha tras comprobarlo. Si se cae antes,
+# la petición falla y se vuelve a comprobar en la siguiente.
+SEGUNDOS_DE_CONFIANZA = 30.0
 
 # El modelo de Claude para las consultas complejas. Sonnet 5 da la mejor
 # relación entre capacidad y coste para este uso puntual.
@@ -46,8 +83,15 @@ class Motor(str, Enum):
 
 @dataclass
 class Mensaje:
-    rol: str  # "system", "user" o "assistant"
+    rol: str  # "system", "user", "assistant" o "tool"
     contenido: str
+    # En un mensaje del asistente: las herramientas que pidió, como
+    # {"name": ..., "arguments": {...}}. Van en el formato nativo del modelo y
+    # no como texto: si el modelo ve sus llamadas pasadas escritas como texto,
+    # las imita escribiéndolas en vez de hacerlas (pasó, y se inventaba datos).
+    llamadas: list[dict[str, Any]] = field(default_factory=list)
+    # En un mensaje "tool": de qué herramienta es el resultado.
+    herramienta: str = ""
 
 
 @dataclass
@@ -106,6 +150,17 @@ def necesita_claude(texto: str, longitud_contexto: int = 0) -> bool:
     return False
 
 
+def modelo_descargado(modelo: str, descargados: list[str]) -> bool:
+    """True si Ollama tiene exactamente el modelo pedido.
+
+    Antes bastaba con que coincidiera el nombre base, así que con solo
+    'qwen3:0.6b' descargado se daba por bueno 'qwen3:8b' y la primera
+    pregunta fallaba. Un nombre sin etiqueta es, para Ollama, ':latest'.
+    """
+    buscado = modelo if ":" in modelo else f"{modelo}:latest"
+    return any(m == buscado or m == modelo for m in descargados)
+
+
 def pidio_ayuda(respuesta: str) -> bool:
     """True si el modelo local reconoció que no puede con la tarea."""
     return MARCA_DE_AYUDA in respuesta
@@ -114,9 +169,17 @@ def pidio_ayuda(respuesta: str) -> bool:
 # Marcadores con los que los modelos de razonamiento envuelven su monólogo
 # interno cuando se les escapa dentro de la respuesta.
 _BLOQUES_DE_RAZONAMIENTO = [
-    (r"<think>", r"</think>"),
-    (r"<thinking>", r"</thinking>"),
-    (r"<reasoning>", r"</reasoning>"),
+    (
+        re.compile(f"{apertura}.*?{cierre}", re.DOTALL | re.IGNORECASE),
+        # Un bloque abierto y nunca cerrado significa que la respuesta se cortó
+        # a media reflexión: de ahí en adelante no hay nada aprovechable.
+        re.compile(f"{apertura}.*", re.DOTALL | re.IGNORECASE),
+    )
+    for apertura, cierre in (
+        (r"<think>", r"</think>"),
+        (r"<thinking>", r"</thinking>"),
+        (r"<reasoning>", r"</reasoning>"),
+    )
 ]
 
 
@@ -131,13 +194,8 @@ def limpiar_razonamiento(texto: str) -> str:
         return texto
 
     limpio = texto
-    for apertura, cierre in _BLOQUES_DE_RAZONAMIENTO:
-        limpio = re.sub(
-            f"{apertura}.*?{cierre}", "", limpio, flags=re.DOTALL | re.IGNORECASE
-        )
-        # Un bloque abierto y nunca cerrado significa que la respuesta se cortó
-        # a media reflexión: de ahí en adelante no hay nada aprovechable.
-        limpio = re.sub(f"{apertura}.*", "", limpio, flags=re.DOTALL | re.IGNORECASE)
+    for cerrado, sin_cerrar in _BLOQUES_DE_RAZONAMIENTO:
+        limpio = sin_cerrar.sub("", cerrado.sub("", limpio))
 
     # Tokens de control que Qwen3 deja sueltos en la respuesta. Se ha visto
     # de verdad: a "¿cómo estás?" contestó "¿Cómo estás? /no_think". Son
@@ -156,12 +214,31 @@ def limpiar_razonamiento(texto: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def mensaje_para_ollama(m: Mensaje) -> dict[str, Any]:
+    """Un mensaje en el formato de la API de chat de Ollama."""
+    datos: dict[str, Any] = {"role": m.rol, "content": m.contenido}
+    if m.llamadas:
+        datos["tool_calls"] = [
+            {"function": {"name": ll["name"], "arguments": ll.get("arguments") or {}}}
+            for ll in m.llamadas
+        ]
+    if m.rol == "tool" and m.herramienta:
+        datos["tool_name"] = m.herramienta
+    return datos
+
+
 class ModeloLocal:
     """Cliente de Ollama. Es el motor por defecto."""
 
     def __init__(self, modelo: str = MODELO_LOCAL, url: str = OLLAMA_URL) -> None:
         self.modelo = modelo
         self.url = url.rstrip("/")
+        # Una sola conexión reutilizada: con httpx.get/post sueltos cada
+        # pregunta abría una conexión nueva con Ollama.
+        self._http = httpx.Client()
+        # Hasta cuándo se da por bueno que Ollama estaba disponible. Antes se
+        # comprobaba en CADA turno, con hasta 3 segundos de espera si tardaba.
+        self._disponible_hasta = 0.0
 
     def arrancar_servidor(self, espera: float = 25.0) -> bool:
         """Arranca Ollama si no está corriendo. Devuelve si quedó disponible.
@@ -221,8 +298,11 @@ class ModeloLocal:
         a False al llamar desde dentro del propio arranque, para no entrar en
         una recursión infinita.
         """
+        if time.monotonic() < self._disponible_hasta:
+            return True
+
         try:
-            r = httpx.get(f"{self.url}/api/tags", timeout=3.0)
+            r = self._http.get(f"{self.url}/api/tags", timeout=3.0)
             r.raise_for_status()
         except (httpx.HTTPError, httpx.TimeoutException):
             if intentar_arrancar:
@@ -230,9 +310,16 @@ class ModeloLocal:
             return False
 
         modelos = [m.get("name", "") for m in r.json().get("models", [])]
-        # Ollama etiqueta como "qwen3:8b"; aceptamos también el nombre sin tag.
-        base = self.modelo.split(":")[0]
-        return any(m == self.modelo or m.startswith(base) for m in modelos)
+        listo = modelo_descargado(self.modelo, modelos)
+        if listo:
+            # Solo se recuerda el "sí": un "no" se vuelve a comprobar en el
+            # siguiente turno, por si lo acabas de arrancar.
+            self._disponible_hasta = time.monotonic() + SEGUNDOS_DE_CONFIANZA
+        return listo
+
+    def marcar_no_disponible(self) -> None:
+        """Olvida que estaba disponible; se llama cuando una petición falla."""
+        self._disponible_hasta = 0.0
 
     def responder(
         self,
@@ -249,9 +336,13 @@ class ModeloLocal:
         """
         cuerpo: dict[str, Any] = {
             "model": self.modelo,
-            "messages": [{"role": m.rol, "content": m.contenido} for m in mensajes],
-            "stream": al_recibir_texto is not None,
-            "options": {"temperature": temperatura},
+            "messages": [mensaje_para_ollama(m) for m in mensajes],
+            # Siempre en streaming, aunque nadie vaya a leer los trozos. Ollama
+            # no reaprovecha el prompt ya procesado entre peticiones con y sin
+            # streaming: medido aquí, una sin streaming tras calentar tardaba
+            # 30 s y la misma con streaming 3,5 s. Así todas comparten caché.
+            "stream": True,
+            "options": {"temperature": temperatura, "num_ctx": CONTEXTO},
             # Qwen3 razona en voz alta por defecto, lo que multiplica por varias
             # veces el tiempo de respuesta. Para un asistente que contesta
             # hablando, la latencia importa más que ese extra de razonamiento:
@@ -262,9 +353,7 @@ class ModeloLocal:
         if herramientas:
             cuerpo["tools"] = herramientas
 
-        if al_recibir_texto is None:
-            return self._respuesta_completa(cuerpo)
-        return self._respuesta_en_trozos(cuerpo, al_recibir_texto)
+        return self._respuesta_en_trozos(cuerpo, al_recibir_texto or (lambda _: None))
 
     def calentar(
         self,
@@ -299,21 +388,6 @@ class ModeloLocal:
             return 0.0
         return time.perf_counter() - inicio
 
-    def _respuesta_completa(self, cuerpo: dict[str, Any]) -> Respuesta:
-        try:
-            r = httpx.post(f"{self.url}/api/chat", json=cuerpo, timeout=180.0)
-            r.raise_for_status()
-        except httpx.HTTPError as e:
-            raise ErrorDeModelo(f"Ollama no respondió: {e}") from e
-
-        datos = r.json().get("message", {})
-        return Respuesta(
-            texto=limpiar_razonamiento(datos.get("content", "")),
-            motor=Motor.LOCAL,
-            modelo=self.modelo,
-            herramientas=datos.get("tool_calls", []),
-        )
-
     def _respuesta_en_trozos(
         self, cuerpo: dict[str, Any], al_recibir_texto: Callable[[str], None]
     ) -> Respuesta:
@@ -321,7 +395,7 @@ class ModeloLocal:
         llamadas: list[dict[str, Any]] = []
 
         try:
-            with httpx.stream(
+            with self._http.stream(
                 "POST", f"{self.url}/api/chat", json=cuerpo, timeout=180.0
             ) as r:
                 r.raise_for_status()
@@ -346,6 +420,7 @@ class ModeloLocal:
                         if not llamadas:
                             al_recibir_texto(trozo)
         except httpx.HTTPError as e:
+            self.marcar_no_disponible()
             raise ErrorDeModelo(f"Ollama falló durante el streaming: {e}") from e
 
         return Respuesta(
@@ -359,6 +434,55 @@ class ModeloLocal:
 # ---------------------------------------------------------------------------
 # Claude (API de Anthropic)
 # ---------------------------------------------------------------------------
+
+
+def herramientas_para_claude(esquemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Traduce las herramientas del formato de Ollama al de Claude.
+
+    El registro las genera como {"type": "function", "function": {...}}, que
+    es lo que entiende Ollama. Claude espera {name, description, input_schema}
+    y rechazaba la petición entera con el otro formato, así que en cuanto había
+    herramientas Jarvis volvía en silencio al modelo local.
+    """
+    convertidas = []
+    for esquema in esquemas:
+        funcion = esquema.get("function", esquema)
+        parametros = dict(funcion.get("parameters") or {"type": "object", "properties": {}})
+        # 'requerido' es una marca interna del registro, no de JSON Schema.
+        parametros["properties"] = {
+            nombre: {k: v for k, v in prop.items() if k != "requerido"}
+            for nombre, prop in parametros.get("properties", {}).items()
+        }
+        convertidas.append(
+            {
+                "name": funcion["name"],
+                "description": funcion.get("description", ""),
+                "input_schema": parametros,
+            }
+        )
+    return convertidas
+
+
+def mensajes_para_claude(mensajes: list[Mensaje]) -> list[dict[str, str]]:
+    """La conversación sin el sistema, en la forma que acepta la API de Claude.
+
+    Se quitan los mensajes vacíos (el agente guarda un turno del asistente en
+    blanco cuando solo llamó a herramientas, y la API los rechaza) y los del
+    asistente al principio, porque la conversación debe empezar por el usuario.
+    """
+    conversacion = []
+    for m in mensajes:
+        if m.rol == "tool":
+            # Claude no ha visto la llamada (no se guardan sus ids), así que
+            # el resultado va como texto del usuario con su cabecera.
+            conversacion.append(
+                {"role": "user", "content": f"[resultado de {m.herramienta}]\n{m.contenido}"}
+            )
+        elif m.rol in ("user", "assistant") and m.contenido.strip():
+            conversacion.append({"role": m.rol, "content": m.contenido})
+    while conversacion and conversacion[0]["role"] != "user":
+        conversacion.pop(0)
+    return conversacion
 
 
 class ModeloClaude:
@@ -394,32 +518,55 @@ class ModeloClaude:
         self,
         mensajes: list[Mensaje],
         herramientas: list[dict[str, Any]] | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 16000,
+        al_recibir_texto: Callable[[str], None] | None = None,
     ) -> Respuesta:
+        """Pide una respuesta a Claude.
+
+        'max_tokens' es holgado a propósito: el modelo razona antes de
+        contestar y ese razonamiento cuenta dentro del tope. Con 4096 una
+        tarea compleja podía cortarse a medias.
+        """
         cliente = self._obtener_cliente()
 
         # Claude recibe el prompt de sistema aparte, no como un mensaje más.
         sistema = "\n\n".join(m.contenido for m in mensajes if m.rol == "system")
-        conversacion = [
-            {"role": m.rol, "content": m.contenido}
-            for m in mensajes
-            if m.rol != "system"
-        ]
 
         parametros: dict[str, Any] = {
             "model": self.modelo,
             "max_tokens": max_tokens,
-            "messages": conversacion,
+            "messages": mensajes_para_claude(mensajes),
         }
         if sistema:
-            parametros["system"] = sistema
+            # Caché del prompt: herramientas y sistema son iguales en cada
+            # petición, y leerlos de caché cuesta una décima parte. El orden
+            # de la API es herramientas -> sistema -> mensajes, así que una
+            # marca aquí cubre ambos.
+            parametros["system"] = [
+                {"type": "text", "text": sistema, "cache_control": {"type": "ephemeral"}}
+            ]
         if herramientas:
-            parametros["tools"] = herramientas
+            parametros["tools"] = herramientas_para_claude(herramientas)
 
         try:
-            r = cliente.messages.create(**parametros)
+            if al_recibir_texto is None:
+                r = cliente.messages.create(**parametros)
+            else:
+                with cliente.messages.stream(**parametros) as flujo:
+                    for trozo in flujo.text_stream:
+                        al_recibir_texto(trozo)
+                    r = flujo.get_final_message()
         except Exception as e:
-            raise ErrorDeModelo(f"La API de Claude falló: {e}") from e
+            # El texto original de la excepción puede traer cabeceras o partes
+            # de la petición, y este mensaje acaba en la ventana y en los logs.
+            estado = getattr(e, "status_code", None)
+            detalle = f"{type(e).__name__}" + (f", HTTP {estado}" if estado else "")
+            raise ErrorDeModelo(f"La API de Claude falló ({detalle}).") from e
+
+        if r.stop_reason == "refusal":
+            return Respuesta(
+                texto="No puedo ayudar con eso.", motor=Motor.CLAUDE, modelo=self.modelo
+            )
 
         texto = "".join(b.text for b in r.content if b.type == "text")
         llamadas = [
@@ -465,7 +612,7 @@ class Cerebro:
 
         Con 'forzar' se puede saltar el enrutado, para cuando tú decides
         explícitamente qué modelo quieres que conteste. Con 'al_recibir_texto'
-        la respuesta del modelo local llega por trozos según se genera.
+        la respuesta llega por trozos según se genera, venga del motor que venga.
         """
         ultimo = next(
             (m.contenido for m in reversed(mensajes) if m.rol == "user"), ""
@@ -473,7 +620,9 @@ class Cerebro:
         contexto = sum(len(m.contenido) for m in mensajes)
 
         if forzar is Motor.CLAUDE:
-            return self.claude.responder(mensajes, herramientas)
+            return self.claude.responder(
+                mensajes, herramientas, al_recibir_texto=al_recibir_texto
+            )
         if forzar is Motor.LOCAL:
             return self.local.responder(
                 mensajes, herramientas, al_recibir_texto=al_recibir_texto
@@ -484,14 +633,18 @@ class Cerebro:
         # Claude solo si además está configurado; si no, se sigue con el local.
         if quiere_claude and self.claude.disponible():
             try:
-                return self.claude.responder(mensajes, herramientas)
+                return self.claude.responder(
+                    mensajes, herramientas, al_recibir_texto=al_recibir_texto
+                )
             except ErrorDeModelo:
                 # Que falle la nube no debe dejarte sin asistente.
                 pass
 
         if not self.local.disponible():
             if self.claude.disponible():
-                return self.claude.responder(mensajes, herramientas)
+                return self.claude.responder(
+                    mensajes, herramientas, al_recibir_texto=al_recibir_texto
+                )
             raise ErrorDeModelo(
                 "No hay ningún modelo disponible. Comprueba que Ollama esté "
                 "arrancado, o configura ANTHROPIC_API_KEY."
@@ -504,7 +657,9 @@ class Cerebro:
         # Segunda oportunidad: el modelo local reconoció que no puede.
         if pidio_ayuda(respuesta.texto) and self.claude.disponible():
             try:
-                return self.claude.responder(mensajes, herramientas)
+                return self.claude.responder(
+                    mensajes, herramientas, al_recibir_texto=al_recibir_texto
+                )
             except ErrorDeModelo:
                 respuesta.texto = respuesta.texto.replace(MARCA_DE_AYUDA, "").strip()
 
