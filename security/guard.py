@@ -14,18 +14,32 @@ comando ya montado, la extensión efectiva del archivo.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import yaml
 
 from security.parada import interruptor
 
+log = logging.getLogger("jarvis.guardian")
+
 RAIZ = Path(__file__).resolve().parent.parent
+
+# Carpetas del propio proyecto que Jarvis nunca debe tocar por la vía de los
+# archivos, aunque la política deje pasar la carpeta que las contiene. Se
+# derivan de dónde está instalado el proyecto, no de una ruta escrita a mano.
+_RUTAS_PROPIAS_PROHIBIDAS = ("security", "data", ".env", ".git", "venv")
+
+# Tamaño a partir del cual el registro de auditoría se rota.
+_MAX_BYTES_REGISTRO = 2 * 1024 * 1024
 RUTA_POLITICA = RAIZ / "security" / "policy.yaml"
 
 # Cuántos intentos de hacer algo prohibido, y en cuánto tiempo, bastan para
@@ -63,6 +77,10 @@ class Peticion:
     objetivo: str = ""
     detalles: dict[str, Any] = field(default_factory=dict)
     motivo: str = ""  # Explicación en lenguaje natural, para mostrarte al confirmar.
+    # La ruta tal y como la validó el guardián (absoluta, con enlaces ya
+    # resueltos). La habilidad debe usar ESTA y no la cadena original: si no,
+    # un enlace cambiado entre la validación y el uso saltaría la política.
+    ruta_resuelta: str | None = None
 
 
 @dataclass
@@ -88,6 +106,9 @@ class Guardian:
     def __init__(self, ruta_politica: Path = RUTA_POLITICA) -> None:
         self.ruta_politica = ruta_politica
         self.politica = self._cargar_politica()
+        # La voz, la interfaz y el agente llaman al guardián desde hilos
+        # distintos; los contadores no son atómicos sin esto.
+        self._lock = threading.RLock()
         self._historial_confirmaciones: list[datetime] = []
         self._acciones_peticion_actual = 0
         # Intentos de hacer algo prohibido, para detectar insistencia.
@@ -150,7 +171,9 @@ class Guardian:
         # 1. Tope de acciones por petición: corta bucles del modelo.
         limites = self.politica.get("limites", {})
         max_acciones = limites.get("max_acciones_por_peticion", 15)
-        if self._acciones_peticion_actual >= max_acciones:
+        with self._lock:
+            acciones_hechas = self._acciones_peticion_actual
+        if acciones_hechas >= max_acciones:
             return denegar(
                 f"Se alcanzó el límite de {max_acciones} acciones en una sola "
                 "petición. Se detiene por seguridad."
@@ -203,20 +226,31 @@ class Guardian:
             if problema:
                 return denegar(problema)
 
+        # Abrir una dirección fuera de la lista de confianza se confirma aunque
+        # la acción sea 'permitir': una página puede llevar datos en la propia
+        # dirección, y así una inyección de prompt no puede sacarlos sin que lo veas.
+        url_no_confiable = False
+        if peticion.accion == "abrir_url":
+            problema, confiable = self._evaluar_url(peticion.objetivo)
+            if problema:
+                return denegar(problema)
+            url_no_confiable = not confiable
+
         # 4. Tope de confirmaciones por hora: evita que te acostumbres a decir
         #    que sí en cadena y que un fallo se convierta en muchos.
-        if nivel is Nivel.CONFIRMAR:
+        if nivel is Nivel.CONFIRMAR or url_no_confiable:
             if not self._hay_cupo_de_confirmaciones():
                 max_conf = limites.get("max_confirmaciones_por_hora", 30)
                 return denegar(
                     f"Se superó el límite de {max_conf} confirmaciones por hora. "
                     "Es una señal de que algo se está descontrolando."
                 )
-            return Veredicto(
-                Decision.NECESITA_CONFIRMACION,
-                "Esta acción modifica tu sistema y necesita tu aprobación.",
-                peticion,
+            razon = (
+                "Esta dirección no está en la lista de sitios de confianza."
+                if url_no_confiable and nivel is not Nivel.CONFIRMAR
+                else "Esta acción modifica tu sistema y necesita tu aprobación."
             )
+            return Veredicto(Decision.NECESITA_CONFIRMACION, razon, peticion)
 
         return Veredicto(Decision.CONCEDIDO, "Acción permitida por la política.", peticion)
 
@@ -251,6 +285,10 @@ class Guardian:
         if not peticion.objetivo:
             return "La acción sobre archivos no indica ninguna ruta."
 
+        sospechosa = self._ruta_sospechosa(peticion.objetivo)
+        if sospechosa:
+            return sospechosa
+
         # resolve() sigue enlaces simbólicos y normaliza '..'. Sin esto, una
         # ruta como "Documents/../../Windows/System32" pasaría los filtros.
         try:
@@ -258,10 +296,21 @@ class Guardian:
         except (OSError, ValueError) as e:
             return f"La ruta '{peticion.objetivo}' no es válida: {e}"
 
+        # Un enlace puede apuntar a una unidad de red aunque la ruta escrita
+        # no lo parezca. El prefijo '\\?\' con unidad es solo la forma larga de
+        # una ruta local, así que se quita antes de mirar.
+        texto_resuelto = str(ruta)
+        if texto_resuelto.startswith("\\\\?\\") and re.match(
+            r"^\\\\\?\\[A-Za-z]:", texto_resuelto
+        ):
+            texto_resuelto = texto_resuelto[4:]
+        if texto_resuelto.startswith("\\\\"):
+            return "La ruta apunta a un recurso de red o de dispositivo."
+
         rutas = self.politica["rutas"]
 
         # Las prohibidas ganan sobre todo lo demás. Se comprueban primero.
-        for prohibida in rutas.get("prohibidas", []):
+        for prohibida in self._rutas_prohibidas():
             if self._esta_dentro(ruta, prohibida):
                 return (
                     f"La ruta está dentro de '{prohibida}', que es una zona "
@@ -278,14 +327,28 @@ class Guardian:
                 f"{etiqueta}. Carpetas permitidas: {', '.join(permitidas)}."
             )
 
-        # Extensión: solo para archivos, no para carpetas.
-        if peticion.accion not in ("listar_carpeta", "crear_carpeta", "buscar_archivos"):
+        # Extensión: solo para archivos, no para carpetas. Al copiar o mover a
+        # una carpeta existente, la extensión del archivo final la comprueba la
+        # propia habilidad cuando ya sabe el nombre completo.
+        a_carpeta = peticion.accion in ("copiar_archivo", "mover_archivo") and ruta.is_dir()
+        if not a_carpeta and peticion.accion not in (
+            "listar_carpeta", "crear_carpeta", "buscar_archivos"
+        ):
             extensiones = self.politica["archivos"].get("extensiones_permitidas", [])
             if extensiones and ruta.suffix.lower() not in extensiones:
                 tipo = ruta.suffix or "(sin extensión)"
                 return (
                     f"El tipo de archivo '{tipo}' no está permitido. "
                     f"Permitidos: {', '.join(extensiones)}."
+                )
+
+            # Algunos tipos se pueden leer pero no escribir: un script dejado en
+            # el Escritorio es código que luego puede ejecutarse.
+            solo_lectura = self.politica["archivos"].get("extensiones_solo_lectura", [])
+            if escribe and ruta.suffix.lower() in solo_lectura:
+                return (
+                    f"Los archivos '{ruta.suffix}' se pueden leer, pero no "
+                    "crear ni modificar."
                 )
 
         # Tamaño: solo tiene sentido al leer algo que ya existe.
@@ -298,7 +361,88 @@ class Guardian:
                     f"{max_mb} MB."
                 )
 
+        peticion.ruta_resuelta = str(ruta)
         return None
+
+    @staticmethod
+    def _ruta_sospechosa(objetivo: str) -> str | None:
+        """Rechaza formas de escribir una ruta que esquivan la comprobación."""
+        texto = objetivo.strip()
+        if texto.startswith(("\\\\", "//")):
+            return "No se permiten rutas de red ni de dispositivo (\\\\...)."
+        # Tras la unidad ('C:'), un ':' más es un flujo alternativo de NTFS:
+        # 'nota.txt:oculto.exe' parece un .txt pero esconde otro archivo.
+        sin_unidad = re.sub(r"^[A-Za-z]:", "", texto)
+        if ":" in sin_unidad:
+            return "No se permiten flujos alternativos de datos (nombre:flujo)."
+        return None
+
+    def filtro_de_lectura(self) -> Callable[[Path], bool]:
+        """Una comprobación rápida y sin registro de si una ruta se puede leer.
+
+        Sirve para filtrar lo que encuentra una búsqueda: validar cada archivo
+        con evaluar() llenaría el registro con miles de líneas. Las carpetas
+        base se resuelven una sola vez.
+        """
+
+        def resolver(base: str) -> Path | None:
+            try:
+                return Path(os.path.normcase(Path(base).expanduser().resolve()))
+            except (OSError, ValueError):
+                return None
+
+        prohibidas = [p for p in map(resolver, self._rutas_prohibidas()) if p]
+        permitidas = [p for p in map(resolver, self.politica["rutas"].get("lectura", [])) if p]
+
+        def dentro(ruta: Path, base: Path) -> bool:
+            return ruta == base or base in ruta.parents
+
+        def permitida(ruta: Path) -> bool:
+            r = Path(os.path.normcase(ruta))
+            if any(dentro(r, p) for p in prohibidas):
+                return False
+            return any(dentro(r, b) for b in permitidas)
+
+        return permitida
+
+    def _rutas_prohibidas(self) -> list[str]:
+        """Las prohibidas de la política más las carpetas propias del proyecto."""
+        propias = [str(RAIZ / nombre) for nombre in _RUTAS_PROPIAS_PROHIBIDAS]
+        return list(self.politica["rutas"].get("prohibidas", [])) + propias
+
+    def _evaluar_url(self, objetivo: str) -> tuple[str | None, bool]:
+        """Devuelve (motivo de rechazo o None, si el sitio es de confianza)."""
+        direccion = objetivo.strip()
+        if not direccion:
+            return "No se indicó ninguna dirección.", False
+
+        esquema = re.match(r"^([a-zA-Z][a-zA-Z0-9+.\-]*):", direccion)
+        if esquema:
+            if esquema.group(1).lower() not in ("http", "https"):
+                return (
+                    f"Solo se pueden abrir direcciones http o https, no "
+                    f"'{esquema.group(1)}'."
+                ), False
+        else:
+            direccion = f"https://{direccion}"
+
+        try:
+            partes = urlparse(direccion)
+            host = (partes.hostname or "").lower()
+        except ValueError:
+            return "La dirección no es válida.", False
+
+        if not host:
+            return "La dirección no es válida.", False
+        # 'https://google.com@sitio-malo.com' engaña a quien lee solo el principio.
+        if "@" in partes.netloc:
+            return "No se permiten direcciones con usuario o contraseña.", False
+
+        confiables = self.politica.get("urls", {}).get("dominios_confiables", [])
+        confiable = any(
+            host == d.lower() or host.endswith("." + d.lower()) for d in confiables
+        )
+        return None, confiable
 
     def _validar_comando(self, comando: str) -> str | None:
         """Devuelve el motivo del rechazo, o None si el comando es aceptable."""
@@ -337,8 +481,13 @@ class Guardian:
             base_resuelta = Path(base).expanduser().resolve()
         except (OSError, ValueError):
             return False
+        # normcase unifica mayúsculas y barras en Windows: 'c:/windows' y
+        # 'C:\Windows' son la misma carpeta, y resolve() no lo corrige en las
+        # partes de la ruta que todavía no existen.
         try:
-            ruta.relative_to(base_resuelta)
+            Path(os.path.normcase(ruta)).relative_to(
+                Path(os.path.normcase(base_resuelta))
+            )
             return True
         except ValueError:
             return False
@@ -352,21 +501,22 @@ class Guardian:
         casos lo correcto es parar y que lo mires tú.
         """
         ahora = datetime.now()
-        self._acciones_prohibidas.append(peticion.accion)
-        ventana = ahora - timedelta(minutes=MINUTOS_DE_VIGILANCIA)
-        self._intentos_prohibidos = [
-            t for t in self._intentos_prohibidos if t > ventana
-        ] + [ahora]
+        with self._lock:
+            self._acciones_prohibidas = (self._acciones_prohibidas + [peticion.accion])[-20:]
+            ventana = ahora - timedelta(minutes=MINUTOS_DE_VIGILANCIA)
+            self._intentos_prohibidos = [
+                t for t in self._intentos_prohibidos if t > ventana
+            ] + [ahora]
+            intentos = len(self._intentos_prohibidos)
+            implicadas = set(self._acciones_prohibidas)
 
-        if len(self._intentos_prohibidos) < INTENTOS_ANTES_DE_PARAR:
+        if intentos < INTENTOS_ANTES_DE_PARAR:
             return
 
-        acciones = ", ".join(
-            sorted({p.accion for p in [peticion]} | set(self._acciones_prohibidas))
-        )
+        acciones = ", ".join(sorted(implicadas | {peticion.accion}))
         interruptor.activar(
             motivo=(
-                f"Jarvis intentó {len(self._intentos_prohibidos)} acciones "
+                f"Jarvis intentó {intentos} acciones "
                 f"prohibidas en {MINUTOS_DE_VIGILANCIA} minutos "
                 f"(la última: {peticion.accion} sobre '{peticion.objetivo}'). "
                 f"Acciones implicadas: {acciones}. "
@@ -378,10 +528,11 @@ class Guardian:
     def _hay_cupo_de_confirmaciones(self) -> bool:
         limite = self.politica.get("limites", {}).get("max_confirmaciones_por_hora", 30)
         hace_una_hora = datetime.now() - timedelta(hours=1)
-        self._historial_confirmaciones = [
-            t for t in self._historial_confirmaciones if t > hace_una_hora
-        ]
-        return len(self._historial_confirmaciones) < limite
+        with self._lock:
+            self._historial_confirmaciones = [
+                t for t in self._historial_confirmaciones if t > hace_una_hora
+            ]
+            return len(self._historial_confirmaciones) < limite
 
     # -- Ejecución controlada ------------------------------------------------
 
@@ -413,33 +564,75 @@ class Guardian:
                     Veredicto(Decision.DENEGADO, "Rechazada por el usuario.", peticion)
                 )
                 raise ErrorDePolitica("Has rechazado la acción.")
-            self._historial_confirmaciones.append(datetime.now())
+            with self._lock:
+                self._historial_confirmaciones.append(datetime.now())
 
-        self._acciones_peticion_actual += 1
-        return funcion()
+        with self._lock:
+            self._acciones_peticion_actual += 1
+
+        # evaluar() deja constancia de lo que se DECIDIÓ; aquí se anota lo que
+        # de verdad PASÓ. Sin esta segunda línea el registro afirmaría que algo
+        # se hizo aunque la habilidad fallara después.
+        try:
+            resultado = funcion()
+        except Exception as e:
+            self._registrar_resultado(peticion, f"fallo: {type(e).__name__}")
+            raise
+        self._registrar_resultado(peticion, "ejecutada")
+        return resultado
 
     def nueva_peticion(self) -> None:
         """Reinicia el contador de acciones. Se llama al empezar cada turno."""
-        self._acciones_peticion_actual = 0
+        with self._lock:
+            self._acciones_peticion_actual = 0
 
     # -- Registro ------------------------------------------------------------
 
+    def _registrar_resultado(self, peticion: Peticion, resultado: str) -> None:
+        if self.registro_activo:
+            self._escribir_registro(
+                {
+                    "accion": peticion.accion,
+                    "objetivo": peticion.objetivo,
+                    "resultado": resultado,
+                }
+            )
+
     def _registrar(self, veredicto: Veredicto) -> None:
-        entrada = {
-            "momento": datetime.now().isoformat(timespec="seconds"),
-            "accion": veredicto.peticion.accion,
-            "objetivo": veredicto.peticion.objetivo,
-            "decision": veredicto.decision.value,
-            "razon": veredicto.razon,
-        }
+        self._escribir_registro(
+            {
+                "accion": veredicto.peticion.accion,
+                "objetivo": veredicto.peticion.objetivo,
+                "decision": veredicto.decision.value,
+                "razon": veredicto.razon,
+            }
+        )
+
+    def _escribir_registro(self, datos: dict[str, Any]) -> None:
+        entrada = {"momento": datetime.now().isoformat(timespec="seconds"), **datos}
+        # Un objetivo enorme (un texto pegado como "ruta") no debe inflar el log.
+        if len(str(entrada.get("objetivo", ""))) > 300:
+            entrada["objetivo"] = str(entrada["objetivo"])[:300] + "…"
         try:
-            self.ruta_registro.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.ruta_registro, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entrada, ensure_ascii=False) + "\n")
+            with self._lock:
+                self.ruta_registro.parent.mkdir(parents=True, exist_ok=True)
+                self._rotar_registro()
+                with open(self.ruta_registro, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entrada, ensure_ascii=False) + "\n")
         except OSError:
             # Un fallo al registrar nunca debe tumbar a Jarvis, pero tampoco
             # debe pasar desapercibido.
-            print(f"[guardian] No se pudo escribir en el registro: {self.ruta_registro}")
+            log.error("No se pudo escribir en el registro: %s", self.ruta_registro)
+
+    def _rotar_registro(self) -> None:
+        """Conserva el registro anterior como .1 cuando el actual crece mucho."""
+        try:
+            if self.ruta_registro.stat().st_size < _MAX_BYTES_REGISTRO:
+                return
+        except OSError:
+            return
+        anterior = self.ruta_registro.with_name(self.ruta_registro.name + ".1")
+        os.replace(self.ruta_registro, anterior)
 
 
 # Instancia compartida: todas las habilidades usan el mismo guardián para que

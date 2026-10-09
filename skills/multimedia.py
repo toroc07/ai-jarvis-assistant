@@ -157,15 +157,11 @@ def buscar_en_youtube(consulta: str) -> str:
 @registro.registrar(
     nombre="reproducir_en_youtube",
     descripcion=(
-        "Busca algo en YouTube y lo reproduce, todo en un paso. ES LA "
-        "HERRAMIENTA CORRECTA cuando el usuario dice cosas como 'abre YouTube "
-        "y busca una canción de Nirvana', 'ponme música', 'reproduce X' o "
-        "'búscame X en YouTube'. NO uses abrir_app ni abrir_url para eso: "
-        "abrirían una pestaña vacía sin reproducir nada. "
-        "Con 'consulta' busca y reproduce directamente el primer resultado. "
-        "Con 'numero' reproduce ese resultado de la última búsqueda, que es lo "
-        "que hay que usar cuando el usuario dice 'reproduce la primera' o "
-        "'pon la segunda'."
+        "Busca en YouTube y reproduce, en un paso. ES LA HERRAMIENTA CORRECTA "
+        "para 'ponme música', 'reproduce X' o 'abre YouTube y busca X' (no "
+        "abrir_app ni abrir_url). Con 'consulta' reproduce el primer "
+        "resultado; con 'numero', ese resultado de la última búsqueda ('pon "
+        "la segunda')."
     ),
     accion="abrir_url",
     parametros={
@@ -184,10 +180,37 @@ def buscar_en_youtube(consulta: str) -> str:
         },
     },
 )
+def _es_url_de_youtube(url: str) -> bool:
+    """True si la dirección es de YouTube de verdad.
+
+    Las direcciones salen de raspar una página, es decir, de contenido ajeno, y
+    esta habilidad las abre sin pasar por la lista de sitios de confianza. Se
+    comprueba el nombre del servidor entero: 'youtube.com.malo.net' no vale.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        partes = urlparse(url)
+    except ValueError:
+        return False
+    host = (partes.hostname or "").lower()
+    return partes.scheme in ("http", "https") and any(
+        host == d or host.endswith("." + d) for d in ("youtube.com", "youtu.be")
+    )
+
+
 def reproducir_en_youtube(consulta: str = "", numero: int | None = None) -> str:
     global _ultimos_resultados, _ultima_busqueda
 
-    from skills.sistema import abrir_url
+    from skills.sistema import abrir_url as _abrir_url
+
+    def abrir_url(url: str) -> str:
+        if not _es_url_de_youtube(url):
+            return (
+                "El resultado no apunta a YouTube, así que no lo abro. "
+                "NO digas que se reprodujo."
+            )
+        return _abrir_url(url)
 
     # Caso 1: "reproduce la primera" referido a lo que se acaba de buscar.
     if numero is not None and not consulta:
